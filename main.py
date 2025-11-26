@@ -1,18 +1,22 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
-app = FastAPI()
+app = FastAPI(
+    title="NOVARIC Political Profile API",
+    description="Serves mock data for politician profiles",
+    version="1.0.0",
+)
 
-# Allow frontend access
+# ✅ VERY IMPORTANT: allow your frontend (Cloud Run) to call this API
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],          # later you can restrict this to your Cloud Run URL
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Mock profiles
+# Simple mock profiles – we can expand these later
 mock_profiles = [
     {
         "id": "edi_rama",
@@ -34,9 +38,11 @@ mock_profiles = [
     }
 ]
 
+
 @app.get("/api/profiles")
 async def get_profiles():
     return mock_profiles
+
 
 @app.get("/api/profiles/{profile_id}")
 async def get_single_profile(profile_id: str):

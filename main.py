@@ -1,30 +1,68 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from utils.load_profiles import load_profiles
 
-app = FastAPI()
+app = FastAPI(
+    title="NOVARIC Backend",
+    description="API for NOVARIC® AI-Powered News profiles",
+    version="1.0.0",
+)
 
-# --- CORS ---
+# --- CORS: allow calls from your frontend (Cloud Run) ---
+# For now we keep it open (*) so it works in all environments.
+# Later, we can restrict to your exact frontend URL.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Later replace with Cloud Run public URL
+    allow_origins=["*"],       # TODO: later put your Cloud Run URL here
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# --- ROUTES ---
+# Temporary in-memory mock data (we can replace with real data later)
+mock_profiles = [
+    {
+        "id": "edi_rama",
+        "personalInfo": {
+            "fullName": "Edi Rama",
+            "party": "Partia Socialiste",
+            "title": "Kryeministër",
+            "imageUrl": "",
+        },
+        "paragonScores": {},
+        "performanceAnalysis": {},
+        "kapschAnalysis": {},
+    },
+    {
+        "id": "sali_berisha",
+        "personalInfo": {
+            "fullName": "Sali Berisha",
+            "party": "Partia Demokratike",
+            "title": "Ish-kryeministër",
+            "imageUrl": "",
+        },
+        "paragonScores": {},
+        "performanceAnalysis": {},
+        "kapschAnalysis": {},
+    },
+]
+
+
 @app.get("/")
 def root():
+    """Simple health-check endpoint."""
     return {"message": "NOVARIC Backend is running"}
+
 
 @app.get("/api/profiles")
 def get_all_profiles():
-    return load_profiles()
+    """Return all profiles."""
+    return mock_profiles
+
 
 @app.get("/api/profiles/{profile_id}")
 def get_profile(profile_id: str):
-    profiles = load_profiles()
-    profile = next((p for p in profiles if p["id"] == profile_id), None)
-    if profile is None:
-        raise HTTPException(status_code=404, detail="Profile not found")
-    return profile
+    """Return a single profile by ID."""
+    for profile in mock_profiles:
+        if profile["id"] == profile_id:
+            return profile
+    raise HTTPException(status_code=404, detail="Profile not found")

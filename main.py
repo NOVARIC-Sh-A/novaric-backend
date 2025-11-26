@@ -1,52 +1,30 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from utils.load_profiles import load_profiles
 
-app = FastAPI(
-    title="NOVARIC Political Profile API",
-    description="Serves mock data for politician profiles",
-    version="1.0.0",
-)
+app = FastAPI()
 
-# ✅ VERY IMPORTANT: allow your frontend (Cloud Run) to call this API
+# --- CORS ---
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],          # later you can restrict this to your Cloud Run URL
-    allow_credentials=True,
+    allow_origins=["*"],  # Later replace with Cloud Run public URL
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Simple mock profiles – we can expand these later
-mock_profiles = [
-    {
-        "id": "edi_rama",
-        "personalInfo": {
-            "fullName": "Edi Rama",
-            "party": "Partia Socialiste",
-            "title": "Kryeministër",
-            "imageUrl": ""
-        }
-    },
-    {
-        "id": "sali_berisha",
-        "personalInfo": {
-            "fullName": "Sali Berisha",
-            "party": "Partia Demokratike",
-            "title": "Ish-kryeministër",
-            "imageUrl": ""
-        }
-    }
-]
-
+# --- ROUTES ---
+@app.get("/")
+def root():
+    return {"message": "NOVARIC Backend is running"}
 
 @app.get("/api/profiles")
-async def get_profiles():
-    return mock_profiles
-
+def get_all_profiles():
+    return load_profiles()
 
 @app.get("/api/profiles/{profile_id}")
-async def get_single_profile(profile_id: str):
-    for p in mock_profiles:
-        if p["id"] == profile_id:
-            return p
-    raise HTTPException(status_code=404, detail="Profile not found")
+def get_profile(profile_id: str):
+    profiles = load_profiles()
+    profile = next((p for p in profiles if p["id"] == profile_id), None)
+    if profile is None:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    return profile

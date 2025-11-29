@@ -1,44 +1,66 @@
 # utils/scoring.py
+from typing import Dict
+from .paragon_constants import PARAGON_DIMENSIONS
 
-import random
-import hashlib
-
-PARAGON_DIMENSIONS = [
-    "Policy Engagement & Expertise",
-    "Accountability & Transparency",
-    "Representation & Responsiveness",
-    "Assertiveness & Influence",
-    "Governance & Institutional Strength",
-    "Organizational & Party Cohesion",
-    "Narrative & Communication",
-]
-
-def deterministic_score(seed: str) -> int:
-    """Generates a stable score (0-100) for the same input."""
-    h = hashlib.sha256(seed.encode()).hexdigest()
-    return int(h[:2], 16)  # 2 hex chars → 0–255 → scaled below
-
-
-def generate_paragon_scores(name: str, category: str, zodiac: str):
+def generate_paragon_scores(
+    name: str,
+    category: str,
+    zodiac: str = "Unknown",
+) -> Dict[str, Dict[str, int] | int]:
     """
-    Fully dynamic scoring engine.
-    Uses name + category + zodiac as a stable seed.
-    Produces:
-      - overall score
-      - 7 PARAGON dimension scores
+    PARAGON® Engine v1 – beginner-friendly version.
+    - Uses fixed baseline scores per dimension.
+    - Adds small adjustments based on category/zodiac.
+    - Always returns:
+        {
+          "overall": int (0–100),
+          "dimensions": { dim: int }
+        }
     """
 
-    dimensions = {}
-    base_seed = f"{name}-{category}-{zodiac}"
+    # 1) Baseline scores per dimension
+    baseline: Dict[str, int] = {
+        "Policy Engagement & Expertise": 65,
+        "Accountability & Transparency": 50,
+        "Representation & Responsiveness": 60,
+        "Assertiveness & Influence": 70,
+        "Governance & Institutional Strength": 55,
+        "Organizational & Party Cohesion": 62,
+        "Narrative & Communication": 68,
+    }
 
-    for dim in PARAGON_DIMENSIONS:
-        raw = deterministic_score(base_seed + dim)
-        score = round((raw / 255) * 100)  # scale to 0–100
-        dimensions[dim] = score
+    # 2) Simple adjustments by category (you can refine later)
+    category_adjustments: Dict[str, Dict[str, int]] = {
+        "political": {
+            "Policy Engagement & Expertise": +5,
+            "Accountability & Transparency": -3,
+        },
+        "media": {
+            "Narrative & Communication": +7,
+        },
+    }
 
-    overall = round(sum(dimensions.values()) / len(dimensions))
+    # 3) Copy baseline into final_scores
+    final_scores: Dict[str, int] = baseline.copy()
+
+    # 4) Apply category adjustments if exist
+    adjustments = category_adjustments.get(category, {})
+    for dim, delta in adjustments.items():
+        if dim in final_scores:
+            final_scores[dim] = max(0, min(100, final_scores[dim] + delta))
+
+    # 5) Optional micro tweak by zodiac (just to show logic – can be removed)
+    if zodiac == "Aries":
+        final_scores["Assertiveness & Influence"] = min(
+            100, final_scores["Assertiveness & Influence"] + 5
+        )
+
+    # 6) Compute overall as weighted average
+    # For v1, all dimensions weight = 1 (simple average)
+    scores_list = [final_scores[d] for d in PARAGON_DIMENSIONS]
+    overall = round(sum(scores_list) / len(scores_list))
 
     return {
         "overall": overall,
-        "dimensions": dimensions,
+        "dimensions": final_scores,
     }

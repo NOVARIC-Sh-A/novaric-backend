@@ -1,3 +1,4 @@
+# mock_profiles.py
 import random
 from typing import Any, Dict, List, Union
 
@@ -1394,7 +1395,7 @@ dhe të analizojë çështjet në mënyrë kritike.""",
         "category": "Media & Showbiz",
         "shortBio": 'Këngëtar, producent dhe drejtues i "E Diela Shqiptare".',
         "detailedBio": """Ardit Gjebrea është një figurë poliedrike në skenën shqiptare, i njohur
-si këngëtar, kompozitor, producent televiziv dhe prezantues. Ai është krijuesi dhe
+kompozitor, producent televiziv dhe prezantues. Ai është krijuesi dhe
 drejtuesi i programit maratonë të së dielës "E Diela Shqiptare" në TV Klan.
 Gjebrea ka një karrierë të gjatë në muzikë, duke filluar që në moshë të re, dhe ka
 organizuar disa nga festivalet më të rëndësishme muzikore në Shqipëri, si
@@ -2077,3 +2078,20 @@ new ventures in challenging markets.
         "zodiacSign": "Capricorn",
     },
 ]
+
+
+# =====================================================================================
+# 4. FINAL EXPORT: COMBINE ALL PROFILES
+# This is the list exported for use by main.py
+# =====================================================================================
+
+PROFILES: List[VipProfile] = (
+    mock_political_profiles_data 
+    + mock_media_profiles_data 
+    + mock_business_profiles_data
+)
+
+# You may also want to export the separate lists if other parts of the app use them:
+# mock_political_profiles_data 
+# mock_media_profiles_data 
+# mock_business_profiles_data

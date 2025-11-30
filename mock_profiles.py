@@ -1,7 +1,3 @@
-# mock_profiles.py
-# Minimal profile metadata used by the backend.
-# Scoring is generated dynamically in main.py
-
 import random
 from typing import Any, Dict, List, Union
 
@@ -2081,4 +2077,3 @@ new ventures in challenging markets.
         "zodiacSign": "Capricorn",
     },
 ]
-

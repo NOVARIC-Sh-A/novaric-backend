@@ -1,0 +1,44 @@
+{
+  "Edi Rama": {
+    "media_mentions": 78,
+    "positive_articles": 32,
+    "negative_articles": 18,
+    "social_engagement": 520000,
+    "poll_rating": 45
+  },
+  "Sali Berisha": {
+    "media_mentions": 60,
+    "positive_articles": 21,
+    "negative_articles": 30,
+    "social_engagement": 340000,
+    "poll_rating": 33
+  },
+  "Ilir Meta": {
+    "media_mentions": 42,
+    "positive_articles": 15,
+    "negative_articles": 22,
+    "social_engagement": 250000,
+    "poll_rating": 28
+  },
+  "Lulzim Basha": {
+    "media_mentions": 38,
+    "positive_articles": 17,
+    "negative_articles": 9,
+    "social_engagement": 290000,
+    "poll_rating": 31
+  },
+  "Monika Kryemadhi": {
+    "media_mentions": 31,
+    "positive_articles": 14,
+    "negative_articles": 12,
+    "social_engagement": 180000,
+    "poll_rating": 24
+  },
+  "Nard Ndoka": {
+    "media_mentions": 15,
+    "positive_articles": 8,
+    "negative_articles": 5,
+    "social_engagement": 50000,
+    "poll_rating": 12
+  }
+}

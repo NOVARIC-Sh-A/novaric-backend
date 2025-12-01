@@ -1,6 +1,9 @@
 # mock_profiles.py
 import random
 from typing import Any, Dict, List, Union
+from utils.metrics_loader import load_metrics
+
+METRICS = load_metrics()
 
 # Lightweight runtime types
 VipProfile = Dict[str, Any]

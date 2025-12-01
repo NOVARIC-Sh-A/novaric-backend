@@ -1,100 +1,115 @@
-import os
-import feedparser
-import statistics
-from supabase import create_client, Client
-from dotenv import load_dotenv
+import type { NextApiRequest, NextApiResponse } from 'next';
+import { GoogleGenAI } from '@google/genai';
+import OpenAI from 'openai';
+import { supabase } from '../../lib/supabaseClient';
 
-# --- 1. SETUP ---
-# Load the passwords from the .env file
-load_dotenv()
-url = os.environ.get("SUPABASE_URL")
-key = os.environ.get("SUPABASE_SERVICE_KEY")
+type ApiResponse = {
+  chatgptReply?: string | null;
+  geminiReply?: string | null;
+  error?: string;
+};
 
-if not url or not key:
-    print("❌ Error: Missing keys. Did you create the .env file?")
-    exit()
+// -----------------------------
+// LOG ACTIVITY TO SUPABASE
+// -----------------------------
+const logToSupabase = async (
+  user_prompt: string,
+  chatgpt_reply: string | null,
+  gemini_reply: string | null,
+  source_ip: string | string[] | undefined
+) => {
+  try {
+    const { error } = await supabase.from('ai_lab_logs').insert({
+      user_prompt,
+      chatgpt_reply,
+      gemini_reply,
+      source_ip: Array.isArray(source_ip) ? source_ip[0] : source_ip,
+    });
 
-# Connect to the Database
-supabase: Client = create_client(url, key)
+    if (error) {
+      console.error('Supabase logging error:', error.message);
+    }
+  } catch (err) {
+    console.error('Unexpected Supabase logging error:', err);
+  }
+};
 
-# --- 2. CONFIGURATION ---
-# The politicians we want to track (IDs must match your DB)
-POLITICIANS = [
-    {"id": 1, "name": "Edi Rama", "query": "Edi Rama Albania"},
-    {"id": 2, "name": "Sali Berisha", "query": "Sali Berisha Albania"},
-]
+// -----------------------------
+// API ROUTE HANDLER
+// -----------------------------
+export default async function handler(
+  req: NextApiRequest,
+  res: NextApiResponse<ApiResponse>
+) {
+  if (req.method !== 'POST') {
+    res.setHeader('Allow', 'POST');
+    return res.status(405).end('Method Not Allowed');
+  }
 
-# --- 3. HELPER FUNCTIONS ---
-def analyze_sentiment_mock(text):
-    """
-    Simple rule-based analysis. 
-    (Later we will replace this with real AI/GPT)
-    """
-    text = text.lower()
-    if any(x in text for x in ['success', 'win', 'good', 'agreement', 'growth']):
-        return 0.8  # Positive
-    elif any(x in text for x in ['scandal', 'fail', 'corruption', 'bad', 'protest']):
-        return -0.6 # Negative
-    return 0.1      # Neutral
+  const { prompt } = req.body;
 
-# --- 4. MAIN PIPELINE ---
-def run_pipeline():
-    print("🚀 Starting NOVARIC Data Pipeline...")
+  if (!prompt || typeof prompt !== 'string') {
+    return res.status(400).json({ error: 'Prompt is required and must be a string.' });
+  }
 
-    for politician in POLITICIANS:
-        print(f"\n🔍 Searching news for: {politician['name']}...")
-        
-        # A. EXTRACT: Get news from Google RSS
-        rss_url = f"https://news.google.com/rss/search?q={politician['query']}&hl=en-US&gl=US&ceid=US:en"
-        feed = feedparser.parse(rss_url)
-        
-        print(f"   Found {len(feed.entries)} articles.")
-        
-        recent_scores = []
-        
-        # We process the top 5 articles
-        for entry in feed.entries[:5]: 
-            
-            # B. TRANSFORM: Calculate Sentiment
-            sentiment = analyze_sentiment_mock(entry.title)
-            
-            # Prepare the data
-            raw_data = {
-                "politician_id": politician['id'],
-                "source_type": "google_news",
-                "content_summary": entry.title,
-                "url": entry.link,
-                "sentiment_score": sentiment
-            }
-            
-            # C. LOAD: Send to Supabase
-            try:
-                supabase.table('raw_signals').insert(raw_data).execute()
-                recent_scores.append(sentiment)
-                print(f"   ✅ Saved Article: {entry.title[:40]}... (Score: {sentiment})")
-            except Exception as e:
-                print(f"   ⚠️ Error saving: {e}")
+  // Check API keys
+  if (!process.env.GEMINI_API_KEY || !process.env.OPENAI_API_KEY) {
+    return res.status(500).json({
+      error: "API keys for AI services are not configured on the server.",
+    });
+  }
 
-        # D. UPDATE SCORES
-        if recent_scores:
-            avg_sentiment = statistics.mean(recent_scores)
-            
-            # Math: Convert -1.0 to 1.0 range -> 0 to 100 range
-            paragon_score = int(((avg_sentiment + 1) / 2) * 100)
-            
-            score_data = {
-                "politician_id": politician['id'],
-                "overall_score": paragon_score,
-                "public_impact": paragon_score, 
-                "integrity": 75, # Placeholder
-                "leadership": 80 # Placeholder
-            }
-            
-            # Save the score
-            supabase.table('paragon_scores').insert(score_data).execute()
-            print(f"   🏆 New Score for {politician['name']}: {paragon_score}/100")
+  try {
+    // INIT BOTH CLIENTS
+    const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+    const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-    print("\n✅ Pipeline Finished.")
+    // RUN BOTH MODELS IN PARALLEL
+    const [geminiResult, chatgptResult] = await Promise.allSettled([
+      ai.models.generateContent({
+        model: 'gemini-3.0-pro',
+        contents: [
+          {
+            role: "user",
+            parts: [{ text: prompt }],
+          },
+        ],
+      }),
 
-if __name__ == "__main__":
-    run_pipeline()
+      openai.chat.completions.create({
+        model: 'gpt-4o',
+        messages: [{ role: 'user', content: prompt }],
+      }),
+    ]);
+
+    // GEMINI RESPONSE
+    const geminiReply =
+      geminiResult.status === 'fulfilled'
+        ? geminiResult.value.response.text()
+        : null;
+
+    // CHATGPT RESPONSE
+    const chatgptReply =
+      chatgptResult.status === 'fulfilled'
+        ? chatgptResult.value.choices[0]?.message?.content ?? null
+        : null;
+
+    // LOG ERRORS
+    if (geminiResult.status === 'rejected')
+      console.error("Gemini API error:", geminiResult.reason);
+
+    if (chatgptResult.status === 'rejected')
+      console.error("ChatGPT API error:", chatgptResult.reason);
+
+    // ASYNC LOGGING TO SUPABASE
+    const source_ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
+    logToSupabase(prompt, chatgptReply, geminiReply, source_ip);
+
+    // RETURN BOTH RESPONSES
+    return res.status(200).json({ geminiReply, chatgptReply });
+
+  } catch (error) {
+    console.error('Error in /api/dual-ai:', error);
+    return res.status(500).json({ error: 'An internal server error occurred.' });
+  }
+}

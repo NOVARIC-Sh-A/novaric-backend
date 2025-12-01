@@ -3,7 +3,11 @@ import random
 from typing import Any, Dict, List, Union
 from utils.metrics_loader import load_metrics
 
+# Load metrics input layer
 METRICS = load_metrics()
+
+# Debug print to confirm data is loaded
+print("Loaded POLITICIAN METRICS:", METRICS)
 
 # Lightweight runtime types
 VipProfile = Dict[str, Any]

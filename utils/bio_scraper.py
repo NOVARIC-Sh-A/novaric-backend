@@ -1,119 +1,218 @@
 # utils/bio_scraper.py
+
 import requests
 from bs4 import BeautifulSoup
 import re
+import time
 from datetime import datetime
+from typing import Optional, Dict, Any
 
-# Albanian Month Mapping
+# ------------------------------
+# ALBANIAN MONTH MAP
+# ------------------------------
 AL_MONTHS = {
     "janar": 1, "shkurt": 2, "mars": 3, "prill": 4, "maj": 5, "qershor": 6,
-    "korrik": 7, "gusht": 8, "shtator": 9, "tetor": 10, "nëntor": 11, "dhjetor": 12
+    "korrik": 7, "gusht": 8, "shtator": 9, "tetor": 10, "nëntor": 11, "dhjetor": 12,
+    "dhjetorë": 12  # variant
 }
 
+EN_MONTHS = {
+    "january": 1, "february": 2, "march": 3, "april": 4, "may": 5, "june": 6,
+    "july": 7, "august": 8, "september": 9, "october": 10, "november": 11, "december": 12
+}
+
+# ------------------------------
+# ZODIAC CALCULATOR
+# ------------------------------
 def get_zodiac_sign(day, month):
-    if (month == 3 and day >= 21) or (month == 4 and day <= 19): return "Aries"
-    if (month == 4 and day >= 20) or (month == 5 and day <= 20): return "Taurus"
-    if (month == 5 and day >= 21) or (month == 6 and day <= 20): return "Gemini"
-    if (month == 6 and day >= 21) or (month == 7 and day <= 22): return "Cancer"
-    if (month == 7 and day >= 23) or (month == 8 and day <= 22): return "Leo"
-    if (month == 8 and day >= 23) or (month == 9 and day <= 22): return "Virgo"
-    if (month == 9 and day >= 23) or (month == 10 and day <= 22): return "Libra"
-    if (month == 10 and day >= 23) or (month == 11 and day <= 21): return "Scorpio"
-    if (month == 11 and day >= 22) or (month == 12 and day <= 21): return "Sagittarius"
-    if (month == 12 and day >= 22) or (month == 1 and day <= 19): return "Capricorn"
-    if (month == 1 and day >= 20) or (month == 2 and day <= 18): return "Aquarius"
-    if (month == 2 and day >= 19) or (month == 3 and day <= 20): return "Pisces"
+    signs = [
+        ("Capricorn", (12, 22), (1, 19)), ("Aquarius", (1, 20), (2, 18)),
+        ("Pisces", (2, 19), (3, 20)), ("Aries", (3, 21), (4, 19)),
+        ("Taurus", (4, 20), (5, 20)), ("Gemini", (5, 21), (6, 20)),
+        ("Cancer", (6, 21), (7, 22)), ("Leo", (7, 23), (8, 22)),
+        ("Virgo", (8, 23), (9, 22)), ("Libra", (9, 23), (10, 22)),
+        ("Scorpio", (10, 23), (11, 21)), ("Sagittarius", (11, 22), (12, 21))
+    ]
+    for sign, start, end in signs:
+        if (month == start[0] and day >= start[1]) or (month == end[0] and day <= end[1]):
+            return sign
     return "Unknown"
 
-def scrape_profile_data(name):
-    # Format name for Wikipedia URL (e.g., "Edi Rama" -> "Edi_Rama")
-    formatted_name = name.replace(" ", "_")
-    url = f"https://sq.wikipedia.org/wiki/{formatted_name}"
-    
-    try:
-        response = requests.get(url)
-        if response.status_code != 200:
-            return {"error": "Page not found"}
+# ------------------------------
+# SAFE REQUEST WRAPPER
+# ------------------------------
+def safe_get(url: str, retries=3, timeout=6):
+    for attempt in range(retries):
+        try:
+            response = requests.get(url, timeout=timeout, headers={
+                "User-Agent": "NOVARIC-ResearchBot/1.0"
+            })
+            if response.status_code == 200:
+                return response
+        except Exception:
+            pass
+        time.sleep(1.5)
+    return None
 
-        soup = BeautifulSoup(response.content, 'html.parser')
-        
-        # Try to find the Infobox (Tabela përmbledhëse)
-        infobox = soup.find("table", {"class": "infobox"})
-        
-        birth_date = None
-        
-        if infobox:
-            # Look for specific keywords in table rows
-            for row in infobox.find_all("tr"):
-                header = row.find("th")
-                if header and ("Lindur" in header.text or "Datëlindja" in header.text):
-                    data = row.find("td")
-                    if data:
-                        # Extract date text (e.g., "4 korrik 1964")
-                        # Regex to find: Day Month Year
-                        text = data.get_text()
-                        match = re.search(r'(\d{1,2})\s+([a-zëç]+)\s+(\d{4})', text, re.IGNORECASE)
-                        if match:
-                            day, month_str, year = match.groups()
-                            month = AL_MONTHS.get(month_str.lower())
-                            if month:
-                                birth_date = datetime(int(year), month, int(day))
-                                break
-        
-        if not birth_date:
-            # Fallback: Try searching the first paragraph
-            first_p = soup.find('p')
-            if first_p:
-                text = first_p.get_text()
-                match = re.search(r'(\d{1,2})\s+([a-zëç]+)\s+(\d{4})', text, re.IGNORECASE)
-                if match:
-                    day, month_str, year = match.groups()
-                    month = AL_MONTHS.get(month_str.lower())
-                    if month:
-                        birth_date = datetime(int(year), month, int(day))
+# ------------------------------
+# DATE PARSER (ALBANIAN + ENGLISH)
+# ------------------------------
+def parse_date(text: str) -> Optional[datetime]:
+    text = text.lower().strip()
 
-        if birth_date:
-            today = datetime.now()
-            age = today.year - birth_date.year - ((today.month, today.day) < (birth_date.month, birth_date.day))
-            zodiac = get_zodiac_sign(birth_date.day, birth_date.month)
-            
-            return {
-                "name": name,
-                "dob": birth_date.strftime("%Y-%m-%d"),
-                "age": age,
-                "zodiac": zodiac,
-                "found": True
-            }
-        else:
-            return {"name": name, "found": False, "error": "Date not parsed"}
+    # Albanian format: "4 korrik 1964"
+    m = re.search(r"(\d{1,2})\s+([a-zëç]+)\s+(\d{4})", text)
+    if m:
+        day, month_str, year = m.groups()
+        if month_str in AL_MONTHS:
+            return datetime(int(year), AL_MONTHS[month_str], int(day))
 
-    except Exception as e:
-        return {"name": name, "found": False, "error": str(e)}
+    # English format: "4 July 1964"
+    m = re.search(r"(\d{1,2})\s+([a-z]+)\s+(\d{4})", text)
+    if m:
+        day, month_str, year = m.groups()
+        if month_str in EN_MONTHS:
+            return datetime(int(year), EN_MONTHS[month_str], int(day))
 
-# --- EXECUTION ---
+    return None
+
+# ------------------------------
+# SCRAPER 1 — SQ WIKIPEDIA
+# ------------------------------
+def scrape_sq_wikipedia(name: str) -> Optional[datetime]:
+    formatted = name.replace(" ", "_")
+    url = f"https://sq.wikipedia.org/wiki/{formatted}"
+    res = safe_get(url)
+    if not res:
+        return None
+
+    soup = BeautifulSoup(res.text, "html.parser")
+    infobox = soup.find("table", {"class": "infobox"})
+    if not infobox:
+        return None
+
+    for row in infobox.find_all("tr"):
+        header = row.find("th")
+        if not header:
+            continue
+        if "lindur" in header.text.lower() or "datëlindja" in header.text.lower():
+            data = row.find("td")
+            if data:
+                date = parse_date(data.text)
+                if date:
+                    return date
+    return None
+
+# ------------------------------
+# SCRAPER 2 — EN WIKIPEDIA (fallback)
+# ------------------------------
+def scrape_en_wikipedia(name: str) -> Optional[datetime]:
+    formatted = name.replace(" ", "_")
+    url = f"https://en.wikipedia.org/wiki/{formatted}"
+    res = safe_get(url)
+    if not res:
+        return None
+
+    soup = BeautifulSoup(res.text, "html.parser")
+    bday = soup.find("span", {"class": "bday"})
+    if bday:
+        try:
+            return datetime.strptime(bday.text.strip(), "%Y-%m-%d")
+        except:
+            pass
+    return None
+
+# ------------------------------
+# SCRAPER 3 — WIKIDATA API
+# ------------------------------
+def scrape_wikidata(name: str) -> Optional[datetime]:
+    url = "https://www.wikidata.org/w/api.php"
+    params = {
+        "action": "wbsearchentities",
+        "language": "sq",
+        "format": "json",
+        "search": name
+    }
+    res = safe_get(url, timeout=10)
+    if not res:
+        return None
+
+    data = res.json()
+    if "search" not in data or len(data["search"]) == 0:
+        return None
+
+    entity_id = data["search"][0]["id"]
+
+    # Get entity details
+    res = safe_get(f"https://www.wikidata.org/wiki/Special:EntityData/{entity_id}.json")
+    if not res:
+        return None
+
+    entity = res.json()
+    claims = entity["entities"][entity_id]["claims"]
+
+    if "P569" in claims:  # P569 = date of birth
+        dob_raw = claims["P569"][0]["mainsnak"]["datavalue"]["value"]["time"]
+        # Format: "+1964-07-04T00:00:00Z"
+        try:
+            year, month, day = map(int, dob_raw[1:11].split("-"))
+            return datetime(year, month, day)
+        except:
+            return None
+
+    return None
+
+# ------------------------------
+# UNIFIED SCRAPER
+# ------------------------------
+def scrape_profile_data(name: str) -> Dict[str, Any]:
+    date = (
+        scrape_sq_wikipedia(name)
+        or scrape_en_wikipedia(name)
+        or scrape_wikidata(name)
+    )
+
+    if not date:
+        return {"name": name, "found": False, "error": "Birth date not found"}
+
+    today = datetime.now()
+    age = today.year - date.year - ((today.month, today.day) < (date.month, date.day))
+    zodiac = get_zodiac_sign(date.day, date.month)
+
+    return {
+        "name": name,
+        "dob": date.strftime("%Y-%m-%d"),
+        "age": age,
+        "zodiac": zodiac,
+        "found": True
+    }
+
+# ------------------------------
+# CLI EXECUTION
+# ------------------------------
 if __name__ == "__main__":
-    # List of names from your mockVipProfiles.ts
     targets = [
-        "Edi Rama", "Sali Berisha", "Ilir Meta", "Lulzim Basha", 
-        "Monika Kryemadhi", "Erion Veliaj", "Belind Këlliçi", 
+        "Edi Rama", "Sali Berisha", "Ilir Meta", "Lulzim Basha",
+        "Monika Kryemadhi", "Erion Veliaj", "Belind Këlliçi",
         "Bajram Begaj", "Benet Beci", "Nard Ndoka",
-        "Blendi Fevziu", "Grida Duma", "Ardit Gjebrea", 
+        "Blendi Fevziu", "Grida Duma", "Ardit Gjebrea",
         "Sokol Balla", "Eni Vasili", "Alketa Vejsiu"
     ]
     
-    print("🔎 Starting Clinical Data Extraction from Wikipedia...")
-    print("-" * 60)
-    
-    results = {}
-    
-    for target in targets:
-        data = scrape_profile_data(target)
-        if data.get("found"):
-            print(f"✅ {target}: {data['age']} years old | {data['zodiac']} | {data['dob']}")
-            results[target] = data
-        else:
-            print(f"⚠️ {target}: Could not find/parse date.")
+    print("🔎 Starting NOVARIC Clinical Bio Extraction")
+    print("=" * 70)
 
-    print("-" * 60)
-    print("COPY THIS OBJECT INTO YOUR TYPESCRIPT FILE:")
+    results = {}
+
+    for person in targets:
+        print(f"➡ Processing {person} ...")
+        data = scrape_profile_data(person)
+        results[person] = data
+        if data["found"]:
+            print(f"   ✔ {data['dob']} | {data['age']} yrs | {data['zodiac']}")
+        else:
+            print(f"   ⚠ No date found: {data.get('error')}")
+
+    print("=" * 70)
+    print("✔ COPY & PASTE INTO TYPESCRIPT:")
     print(results)

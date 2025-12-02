@@ -1,115 +1,135 @@
-import type { NextApiRequest, NextApiResponse } from 'next';
-import { GoogleGenAI } from '@google/genai';
-import OpenAI from 'openai';
-import { supabase } from '../../lib/supabaseClient';
+import os
+import feedparser
+import statistics
+from supabase import create_client, Client
+from dotenv import load_dotenv
 
-type ApiResponse = {
-  chatgptReply?: string | null;
-  geminiReply?: string | null;
-  error?: string;
-};
+# IMPORT THE METHODOLOGY LOGIC
+from methodology import calculate_paragon_score, calculate_pip_status, normalize_score
 
-// -----------------------------
-// LOG ACTIVITY TO SUPABASE
-// -----------------------------
-const logToSupabase = async (
-  user_prompt: string,
-  chatgpt_reply: string | null,
-  gemini_reply: string | null,
-  source_ip: string | string[] | undefined
-) => {
-  try {
-    const { error } = await supabase.from('ai_lab_logs').insert({
-      user_prompt,
-      chatgpt_reply,
-      gemini_reply,
-      source_ip: Array.isArray(source_ip) ? source_ip[0] : source_ip,
-    });
+# 1. SETUP
+load_dotenv()
+url = os.environ.get("SUPABASE_URL")
+key = os.environ.get("SUPABASE_SERVICE_KEY")
 
-    if (error) {
-      console.error('Supabase logging error:', error.message);
+if not url or not key:
+    print("❌ Error: Keys missing.")
+    exit()
+
+supabase: Client = create_client(url, key)
+
+# 2. CONFIGURATION (Politicians)
+POLITICIANS = [
+    {"id": 1, "name": "Edi Rama", "query": "Edi Rama Albania"},
+    {"id": 2, "name": "Sali Berisha", "query": "Sali Berisha Albania"},
+]
+
+# 3. AI SIMULATION (To be replaced by GPT-4 later)
+def analyze_article_dimensions(text):
+    """
+    Analyzes text and returns scores for the PARAGON dimensions.
+    """
+    text = text.lower()
+    
+    # Mock Analysis Logic based on keywords
+    scores = {
+        "political_engagement": 50, # Neutral start
+        "integrity": 50,
+        "governance": 50,
+        "communication": 50,
+        "influence": 50
     }
-  } catch (err) {
-    console.error('Unexpected Supabase logging error:', err);
-  }
-};
+    
+    # Simple Keyword Scoring (Temporary until GPT-4)
+    if "corruption" in text or "spak" in text or "scandal" in text:
+        scores['integrity'] = 20 # Low score
+    if "eu" in text or "integration" in text or "investment" in text:
+        scores['political_engagement'] = 80
+    if "speech" in text or "interview" in text:
+        scores['communication'] = 75
+    if "decree" in text or "law" in text:
+        scores['governance'] = 70
 
-// -----------------------------
-// API ROUTE HANDLER
-// -----------------------------
-export default async function handler(
-  req: NextApiRequest,
-  res: NextApiResponse<ApiResponse>
-) {
-  if (req.method !== 'POST') {
-    res.setHeader('Allow', 'POST');
-    return res.status(405).end('Method Not Allowed');
-  }
+    return scores
 
-  const { prompt } = req.body;
+# 4. MAIN PIPELINE
+def run_pipeline():
+    print("🚀 Starting PARAGON® Analytical Engine...")
 
-  if (!prompt || typeof prompt !== 'string') {
-    return res.status(400).json({ error: 'Prompt is required and must be a string.' });
-  }
+    for politician in POLITICIANS:
+        print(f"\n👤 Processing: {politician['name']}...")
+        
+        # A. EXTRACT (News)
+        rss_url = f"https://news.google.com/rss/search?q={politician['query']}&hl=en-US&gl=US&ceid=US:en"
+        feed = feedparser.parse(rss_url)
+        
+        daily_metrics = {
+            "political_engagement": [],
+            "integrity": [],
+            "governance": [],
+            "communication": [],
+            "influence": []
+        }
+        
+        print(f"   Found {len(feed.entries)} articles.")
 
-  // Check API keys
-  if (!process.env.GEMINI_API_KEY || !process.env.OPENAI_API_KEY) {
-    return res.status(500).json({
-      error: "API keys for AI services are not configured on the server.",
-    });
-  }
+        # B. TRANSFORM (Apply Dimensions)
+        for entry in feed.entries[:5]:
+            # Get dimension scores for this article
+            article_scores = analyze_article_dimensions(entry.title)
+            
+            # Save Raw Signal
+            raw_data = {
+                "politician_id": politician['id'],
+                "source_type": "google_news",
+                "content_summary": entry.title,
+                "url": entry.link,
+                # Store the average of dimensions as a proxy for sentiment
+                "sentiment_score": (sum(article_scores.values()) / 5) / 100 
+            }
+            supabase.table('raw_signals').insert(raw_data).execute()
+            
+            # Aggregate data
+            for key, val in article_scores.items():
+                daily_metrics[key].append(val)
 
-  try {
-    // INIT BOTH CLIENTS
-    const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-    const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+        # C. COMPUTE PARAGON SCORE
+        if daily_metrics['integrity']: # If we have data
+            
+            # 1. Average the daily inputs
+            avg_inputs = {
+                "political_engagement": statistics.mean(daily_metrics['political_engagement']),
+                "integrity": statistics.mean(daily_metrics['integrity']),
+                "governance": statistics.mean(daily_metrics['governance']),
+                "communication": statistics.mean(daily_metrics['communication']),
+                "influence": statistics.mean(daily_metrics['influence']),
+            }
 
-    // RUN BOTH MODELS IN PARALLEL
-    const [geminiResult, chatgptResult] = await Promise.allSettled([
-      ai.models.generateContent({
-        model: 'gemini-3.0-pro',
-        contents: [
-          {
-            role: "user",
-            parts: [{ text: prompt }],
-          },
-        ],
-      }),
+            # 2. Apply Weighted Formula (Methodology)
+            final_paragon_score = calculate_paragon_score(avg_inputs)
+            
+            # 3. Calculate PIP (Integrity Matrix)
+            # Using 'integrity' as Behavioral Risk (inverted) and 'influence' as Structural Vulnerability
+            structural = avg_inputs['influence'] 
+            behavioral_risk = 100 - avg_inputs['integrity'] # Low integrity = High risk
+            
+            pip_result = calculate_pip_status(structural, behavioral_risk)
 
-      openai.chat.completions.create({
-        model: 'gpt-4o',
-        messages: [{ role: 'user', content: prompt }],
-      }),
-    ]);
+            # D. LOAD (Save to DB)
+            score_entry = {
+                "politician_id": politician['id'],
+                "overall_score": final_paragon_score,
+                "leadership": int(avg_inputs['governance']),
+                "integrity": int(avg_inputs['integrity']),
+                "public_impact": int(avg_inputs['communication'])
+            }
+            
+            supabase.table('paragon_scores').insert(score_entry).execute()
+            
+            print(f"   🏆 PARAGON Score: {final_paragon_score}")
+            print(f"   🛡️ PIP Status: {pip_result['title']} ({pip_result['status']})")
 
-    // GEMINI RESPONSE
-    const geminiReply =
-      geminiResult.status === 'fulfilled'
-        ? geminiResult.value.response.text()
-        : null;
+    print("\n✅ Analysis Complete.")
 
-    // CHATGPT RESPONSE
-    const chatgptReply =
-      chatgptResult.status === 'fulfilled'
-        ? chatgptResult.value.choices[0]?.message?.content ?? null
-        : null;
-
-    // LOG ERRORS
-    if (geminiResult.status === 'rejected')
-      console.error("Gemini API error:", geminiResult.reason);
-
-    if (chatgptResult.status === 'rejected')
-      console.error("ChatGPT API error:", chatgptResult.reason);
-
-    // ASYNC LOGGING TO SUPABASE
-    const source_ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
-    logToSupabase(prompt, chatgptReply, geminiReply, source_ip);
-
-    // RETURN BOTH RESPONSES
-    return res.status(200).json({ geminiReply, chatgptReply });
-
-  } catch (error) {
-    console.error('Error in /api/dual-ai:', error);
-    return res.status(500).json({ error: 'An internal server error occurred.' });
-  }
-}
+if __name__ == "__main__":
+    run_pipeline()

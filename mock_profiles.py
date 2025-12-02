@@ -1,22 +1,31 @@
 # mock_profiles.py
 import random
+import logging
 from typing import Any, Dict, List, Union
-from utils.metrics_loader import load_metrics
 
-# Load metrics input layer
-METRICS = load_metrics()
-
-# Debug print to confirm data is loaded
-print("Loaded POLITICIAN METRICS:", METRICS)
+# =====================================================================================
+# ARCHITECTURE IMPORTS: The "Bridge" to the Engine
+# =====================================================================================
+try:
+    from utils.metrics_loader import load_metrics
+    from utils.paragon_engine import ParagonEngine
+    RAW_EVIDENCE = load_metrics()
+    print(f"✅ PARAGON System: Loaded evidence for {len(RAW_EVIDENCE)} profiles.")
+except ImportError:
+    print("⚠️ PARAGON System: Engine or Metrics not found. Running in Offline Mode.")
+    RAW_EVIDENCE = {}
+except Exception as e:
+    print(f"⚠️ PARAGON System: Error loading metrics: {e}")
+    RAW_EVIDENCE = {}
 
 # Lightweight runtime types
 VipProfile = Dict[str, Any]
 ParagonEntry = Dict[str, Any]
 
 
-# #####################################################################################
-# Helper generators (photo URL, random scores, PARAGON / MARAGON entries)
-# #####################################################################################
+# =====================================================================================
+# HELPER GENERATORS
+# =====================================================================================
 
 def generate_profile_photo_url(name: str) -> str:
     """
@@ -35,6 +44,7 @@ def generate_random_score(min_val: int = 40, max_val: int = 85) -> int:
     return random.randint(min_val, max_val)
 
 
+# This is the FALLBACK function. It is used only if real data is missing.
 def generate_paragon_analysis(name: str) -> List[ParagonEntry]:
     return [
         {
@@ -176,18 +186,8 @@ dhe për të sfiduar supozimet e tyre.""",
 
 
 ZODIAC_SIGNS = [
-    "Aries",
-    "Taurus",
-    "Gemini",
-    "Cancer",
-    "Leo",
-    "Virgo",
-    "Libra",
-    "Scorpio",
-    "Sagittarius",
-    "Capricorn",
-    "Aquarius",
-    "Pisces",
+    "Aries", "Taurus", "Gemini", "Cancer", "Leo", "Virgo",
+    "Libra", "Scorpio", "Sagittarius", "Capricorn", "Aquarius", "Pisces",
 ]
 
 
@@ -2088,7 +2088,39 @@ new ventures in challenging markets.
 
 
 # =====================================================================================
-# 4. FINAL EXPORT: COMBINE ALL PROFILES
+# 4. HYDRATION LOGIC (The "Bridge" to the Engine)
+# =====================================================================================
+
+def hydrate_profiles_with_engine(profiles: List[VipProfile]):
+    """
+    Iterates through all profiles. If a profile has real data in RAW_EVIDENCE,
+    it recalculates the score using ParagonEngine and overwrites the static data.
+    """
+    if not RAW_EVIDENCE:
+        return # Skip if no data loaded
+
+    count_updated = 0
+    for profile in profiles:
+        pid = profile.get("id")
+        if pid in RAW_EVIDENCE:
+            try:
+                # 1. Instantiate Engine with specific evidence
+                engine = ParagonEngine(RAW_EVIDENCE[pid])
+                
+                # 2. Calculate clinical score
+                new_analysis = engine.calculate()
+                
+                # 3. Overwrite the static fallback
+                profile["paragonAnalysis"] = new_analysis
+                count_updated += 1
+            except Exception as e:
+                print(f"⚠️ Error calculating score for {pid}: {e}")
+            
+    if count_updated > 0:
+        print(f"🚀 PARAGON Engine: Clinically updated {count_updated} profiles with real data.")
+
+# =====================================================================================
+# 5. FINAL EXPORT: COMBINE ALL PROFILES
 # This is the list exported for use by main.py
 # =====================================================================================
 
@@ -2098,7 +2130,5 @@ PROFILES: List[VipProfile] = (
     + mock_business_profiles_data
 )
 
-# You may also want to export the separate lists if other parts of the app use them:
-# mock_political_profiles_data 
-# mock_media_profiles_data 
-# mock_business_profiles_data
+# Run the hydration pass before exporting
+hydrate_profiles_with_engine(PROFILES)

@@ -1,44 +1,50 @@
 {
-  "Edi Rama": {
-    "media_mentions": 78,
-    "positive_articles": 32,
-    "negative_articles": 18,
-    "social_engagement": 520000,
-    "poll_rating": 45
+  "vip1": {
+    "name": "Edi Rama",
+    "metrics": {
+      "scandals_flagged": 5,
+      "wealth_declaration_issues": 1,
+      "years_in_power": 11,
+      "public_projects_completed": 48,
+      "parliamentary_attendance": 35,
+      "international_meetings": 25,
+      "party_control_index": 9.8,
+      "media_mentions_monthly": 1500,
+      "legislative_initiatives": 15,
+      "independence_index": 0
+    },
+    "kapsh_profile": "Traditional Patron"
   },
-  "Sali Berisha": {
-    "media_mentions": 60,
-    "positive_articles": 21,
-    "negative_articles": 30,
-    "social_engagement": 340000,
-    "poll_rating": 33
+  "vip2": {
+    "name": "Sali Berisha",
+    "metrics": {
+      "scandals_flagged": 8,
+      "wealth_declaration_issues": 3,
+      "years_in_power": 32,
+      "public_projects_completed": 10,
+      "parliamentary_attendance": 10,
+      "international_meetings": 0,
+      "party_control_index": 8.5,
+      "media_mentions_monthly": 900,
+      "legislative_initiatives": 2,
+      "independence_index": 9
+    },
+    "kapsh_profile": "Isolated Actor"
   },
-  "Ilir Meta": {
-    "media_mentions": 42,
-    "positive_articles": 15,
-    "negative_articles": 22,
-    "social_engagement": 250000,
-    "poll_rating": 28
-  },
-  "Lulzim Basha": {
-    "media_mentions": 38,
-    "positive_articles": 17,
-    "negative_articles": 9,
-    "social_engagement": 290000,
-    "poll_rating": 31
-  },
-  "Monika Kryemadhi": {
-    "media_mentions": 31,
-    "positive_articles": 14,
-    "negative_articles": 12,
-    "social_engagement": 180000,
-    "poll_rating": 24
-  },
-  "Nard Ndoka": {
-    "media_mentions": 15,
-    "positive_articles": 8,
-    "negative_articles": 5,
-    "social_engagement": 50000,
-    "poll_rating": 12
+  "vip29": {
+    "name": "Belind Këlliçi",
+    "metrics": {
+      "scandals_flagged": 0,
+      "wealth_declaration_issues": 0,
+      "years_in_power": 2,
+      "public_projects_completed": 5,
+      "parliamentary_attendance": 85,
+      "international_meetings": 4,
+      "party_control_index": 3.5,
+      "media_mentions_monthly": 400,
+      "legislative_initiatives": 8,
+      "independence_index": 7
+    },
+    "kapsh_profile": "Hybrid Broker"
   }
 }

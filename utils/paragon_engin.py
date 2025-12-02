@@ -1,155 +1,100 @@
-# utils/paragon_engine.py
 import math
 
-# --- 1. CONFIGURATION (The "Weights" & "Ranges") ---
-# Adapted for Albanian Context (AGIB/KAPSH)
-
-METRIC_RANGES = {
-    # AGIB (Structural/Integrity)
-    "scandals_flagged": {"min": 0, "max": 10}, # Inverse (0 is best)
-    "wealth_declaration_issues": {"min": 0, "max": 5}, # Inverse
-    "years_in_power": {"min": 0, "max": 20}, # Vulnerability factor
-    
-    # Professional / Legislative
-    "parliamentary_attendance": {"min": 0, "max": 100}, # %
-    "legislative_initiatives": {"min": 0, "max": 20},
-    "independence_index": {"min": 0, "max": 10}, # Voted against party line
-    
-    # Influence / KAPSH
-    "party_control_index": {"min": 0, "max": 10}, # 10 = Absolute Leader
-    "media_mentions_monthly": {"min": 0, "max": 2000},
-    "social_sentiment": {"min": -1.0, "max": 1.0},
-    
-    # Governance
-    "public_projects_completed": {"min": 0, "max": 50},
-    "international_meetings": {"min": 0, "max": 30}
-}
-
+# --- CONFIGURATION: The "Rules of the Game" for Albanian Politics ---
 WEIGHTS = {
-    "integrity": {
-        "scandals_flagged": 0.60,       # High weight due to 'State Capture' risk
-        "wealth_declaration_issues": 0.40
-    },
-    "governance": {
-        "public_projects_completed": 0.50,
-        "parliamentary_attendance": 0.30,
-        "international_meetings": 0.20
-    },
-    "influence": {
-        "party_control_index": 0.60,    # In Albania, party control is power
-        "media_mentions_monthly": 0.40
-    },
-    "professionalism": {
-        "legislative_initiatives": 0.70,
-        "independence_index": 0.30
-    }
+    "integrity": {"scandals": 0.60, "wealth": 0.40},
+    "governance": {"projects": 0.50, "attendance": 0.30, "intl": 0.20},
+    "influence": {"party": 0.60, "media": 0.40},
+    "professionalism": {"legislative": 0.70, "independence": 0.30}
 }
 
-# --- 2. HELPER FUNCTIONS ---
-
-def normalize(value, min_v, max_v, inverse=False):
-    """Normalizes a raw number to a 0-100 score."""
-    if max_v == min_v: return 0
-    
-    # Clamp
-    value = max(min_v, min(value, max_v))
-    
-    if inverse:
-        # For corruption: 0 scandals = 100 score
-        return ((max_v - value) / (max_v - min_v)) * 100
-    else:
-        # For projects: 50 projects = 100 score
-        return ((value - min_v) / (max_v - min_v)) * 100
-
-# --- 3. THE CORE ENGINE ---
+RANGES = {
+    "scandals": (0, 10),       "wealth": (0, 5),          # Inverse (Lower is better)
+    "projects": (0, 50),       "attendance": (0, 100),    # Direct
+    "intl": (0, 30),           "party": (0, 10),
+    "media": (0, 2000),        "legislative": (0, 20),
+    "independence": (0, 10)
+}
 
 class ParagonEngine:
-    def __init__(self, raw_metrics):
-        self.raw = raw_metrics
+    def __init__(self, raw_data):
+        self.metrics = raw_data.get('metrics', {})
+        self.kapsh_profile = raw_data.get('kapsh_profile', 'Unknown')
 
-    def _get_metric_score(self, key, inverse=False):
-        val = self.raw.get(key, 0)
-        cfg = METRIC_RANGES.get(key, {"min": 0, "max": 100})
-        return normalize(val, cfg['min'], cfg['max'], inverse)
+    def _norm(self, key, value, inverse=False):
+        """Normalizes raw data to 0-100 scale."""
+        min_v, max_v = RANGES.get(key, (0, 100))
+        clamped = max(min_v, min(value, max_v))
+        score = ((clamped - min_v) / (max_v - min_v)) * 100
+        return 100 - score if inverse else score
 
-    def compute_scores(self):
-        # 1. Calculate Dimension Scores
-        
-        # INTEGRITY (PIP)
-        m_scandals = self._get_metric_score("scandals_flagged", inverse=True)
-        m_wealth = self._get_metric_score("wealth_declaration_issues", inverse=True)
-        
-        score_integrity = (m_scandals * WEIGHTS['integrity']['scandals_flagged']) + \
-                          (m_wealth * WEIGHTS['integrity']['wealth_declaration_issues'])
+    def calculate(self):
+        # 1. PILLAR: ACCOUNTABILITY (Integrity)
+        s_scandals = self._norm("scandals", self.metrics.get("scandals_flagged", 0), inverse=True)
+        s_wealth = self._norm("wealth", self.metrics.get("wealth_declaration_issues", 0), inverse=True)
+        score_integrity = (s_scandals * WEIGHTS["integrity"]["scandals"]) + \
+                          (s_wealth * WEIGHTS["integrity"]["wealth"])
 
-        # GOVERNANCE (Institutional Strength)
-        m_projects = self._get_metric_score("public_projects_completed")
-        m_attend = self._get_metric_score("parliamentary_attendance") # Assuming input is already % or 0-100
-        m_intl = self._get_metric_score("international_meetings")
-        
-        score_governance = (m_projects * WEIGHTS['governance']['public_projects_completed']) + \
-                           (m_attend * WEIGHTS['governance']['parliamentary_attendance']) + \
-                           (m_intl * WEIGHTS['governance']['international_meetings'])
+        # 2. PILLAR: GOVERNANCE (Institutional Strength)
+        s_proj = self._norm("projects", self.metrics.get("public_projects_completed", 0))
+        s_att = self._norm("attendance", self.metrics.get("parliamentary_attendance", 0))
+        s_intl = self._norm("intl", self.metrics.get("international_meetings", 0))
+        score_governance = (s_proj * WEIGHTS["governance"]["projects"]) + \
+                           (s_att * WEIGHTS["governance"]["attendance"]) + \
+                           (s_intl * WEIGHTS["governance"]["intl"])
 
-        # INFLUENCE (Assertiveness)
-        m_party = self._get_metric_score("party_control_index")
-        m_media = self._get_metric_score("media_mentions_monthly")
-        
-        score_influence = (m_party * WEIGHTS['influence']['party_control_index']) + \
-                          (m_media * WEIGHTS['influence']['media_mentions_monthly'])
+        # 3. PILLAR: INFLUENCE (Assertiveness)
+        s_party = self._norm("party", self.metrics.get("party_control_index", 0))
+        s_media = self._norm("media", self.metrics.get("media_mentions_monthly", 0))
+        score_influence = (s_party * WEIGHTS["influence"]["party"]) + \
+                          (s_media * WEIGHTS["influence"]["media"])
 
-        # PROFESSIONALISM (Policy Engagement)
-        m_legis = self._get_metric_score("legislative_initiatives")
-        m_indep = self._get_metric_score("independence_index")
-        
-        score_prof = (m_legis * WEIGHTS['professionalism']['legislative_initiatives']) + \
-                     (m_indep * WEIGHTS['professionalism']['independence_index'])
+        # 4. PILLAR: POLICY (Engagement)
+        s_leg = self._norm("legislative", self.metrics.get("legislative_initiatives", 0))
+        s_ind = self._norm("independence", self.metrics.get("independence_index", 0))
+        score_prof = (s_leg * WEIGHTS["professionalism"]["legislative"]) + \
+                     (s_ind * WEIGHTS["professionalism"]["independence"])
 
-        # 2. Compute Overall PARAGON Score
-        # Weights: Integrity 35% (Critical), Governance 25%, Influence 20%, Prof 20%
-        overall = (score_integrity * 0.35) + \
-                  (score_governance * 0.25) + \
-                  (score_influence * 0.20) + \
-                  (score_prof * 0.20)
+        # GENERATE DIAGNOSIS TEXT
+        diagnosis = self._get_clinical_diagnosis(score_integrity, score_influence)
 
-        # 3. Generate Clinical Diagnosis (Text)
-        diagnosis = self._generate_diagnosis(score_integrity, score_influence)
-
-        return {
-            "overall": int(overall),
-            "dimensions": {
-                "Accountability & Transparency": int(score_integrity),
-                "Governance & Institutional Strength": int(score_governance),
-                "Assertiveness & Influence": int(score_influence),
-                "Policy Engagement & Expertise": int(score_prof)
+        return [
+            {
+                "dimension": "Accountability & Transparency",
+                "score": int(score_integrity),
+                "peerAverage": 62, "globalBenchmark": 70,
+                "description": "Llogaridhënia dhe transparenca.",
+                "commentary": f"Diagnoza PIP: {diagnosis}"
             },
-            "diagnosis": diagnosis
-        }
+            {
+                "dimension": "Governance & Institutional Strength",
+                "score": int(score_governance),
+                "peerAverage": 67, "globalBenchmark": 73,
+                "description": "Forca institucionale dhe projektet.",
+                "commentary": f"Efikasiteti i qeverisjes bazuar në {self.metrics.get('public_projects_completed')} projekte."
+            },
+            {
+                "dimension": "Assertiveness & Influence",
+                "score": int(score_influence),
+                "peerAverage": 65, "globalBenchmark": 68,
+                "description": "Ndikimi politik dhe mediatik.",
+                "commentary": f"Indeksi i kontrollit partiak: {self.metrics.get('party_control_index')}/10."
+            },
+            {
+                "dimension": "Policy Engagement & Expertise",
+                "score": int(score_prof),
+                "peerAverage": 68, "globalBenchmark": 72,
+                "description": "Angazhimi legjislativ.",
+                "commentary": f"Nisma ligjore të ndërmarra: {self.metrics.get('legislative_initiatives')}."
+            }
+        ]
 
-    def _generate_diagnosis(self, integrity, influence):
-        """Generates the clinical summary text based on the 2x2 Matrix logic."""
-        if integrity < 50 and influence > 70:
-            return "ALERT I LARTË: Profil me ndikim të lartë por rrezik të theksuar integriteti (Kuadranti 4 - Kapje Shteti)."
+    def _get_clinical_diagnosis(self, integrity, influence):
+        if integrity < 50 and influence > 80:
+            return "RREZIK I LARTË (Kapje Shteti)"
         elif integrity < 50:
-            return "VULNERABËL: Tregues të ulët transparence dhe llogaridhënie."
-        elif integrity > 80 and influence > 80:
-            return "LIDER MODEL: Balancë e shkëlqyer midis fuqisë politike dhe integritetit etik."
+            return "Vulnerabël ndaj Korrupsionit"
+        elif integrity > 75:
+            return "Integritet i Qëndrueshëm"
         else:
-            return "STABËL: Profil brenda normave standarde të performancës."
-
-# --- TEST IT ---
-if __name__ == "__main__":
-    # Mock Data for Edi Rama
-    sample_metrics = {
-        "scandals_flagged": 4,          # High scandals
-        "wealth_declaration_issues": 1,
-        "public_projects_completed": 45, # High governance
-        "parliamentary_attendance": 45,  # Low attendance
-        "party_control_index": 9.5,      # Absolute control
-        "media_mentions_monthly": 1200,
-        "legislative_initiatives": 12
-    }
-    
-    engine = ParagonEngine(sample_metrics)
-    result = engine.compute_scores()
-    print(result)
+            return "Profil Standard (Nën Monitorim)"

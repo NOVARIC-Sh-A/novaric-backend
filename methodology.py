@@ -1,100 +1,107 @@
 """
-PARAGON® UNIFIED METHODOLOGY ENGINE
------------------------------------
-This module implements the mathematical rules defined in the NOVARIC methodology.
-It covers:
-1. P.A.G. Analysis (Engagement, Accountability, Governance)
-2. PIP (Political Integrity Profile) Matrix
-3. Weighted Scoring Algorithm
+PARAGON® HYBRID ENGINE (Methodology Master)
+-------------------------------------------
+1. Weights & Dimensions
+2. Hybrid Scoring Logic (Flags -> Scores)
+3. PIP Matrix Logic (Quadrants)
 """
 
-# --- CONFIGURATION: DIMENSION WEIGHTS ---
-# Based on the "Contextual Adaptation" section:
-# "Peshat... janë kalibruar posaçërisht për të reflektuar realitetet shqiptare."
+# --- CONFIGURATION ---
 PARAGON_WEIGHTS = {
-    "political_engagement": 0.15, # P - Angazhimi & Ekspertiza
-    "integrity": 0.30,            # A - Llogaridhënia & Transparenca (Highest Priority)
-    "governance": 0.20,           # G - Qeverisja & Forca Institucionale
-    "communication": 0.15,        # Narrativa & Komunikimi
-    "influence": 0.20             # Ndikimi & Rrjetëzimi (Network Centrality)
+    "political_engagement": 0.20,
+    "integrity": 0.30,            # High Priority
+    "governance": 0.20,
+    "communication": 0.15,
+    "influence": 0.15
 }
 
-def normalize_score(raw_value, min_val, max_val):
+# --- PART A: SCORING ALGORITHMS ---
+def calculate_hybrid_score(ai_data_list):
     """
-    "Të gjitha të dhënat e papërpunuara normalizohen në një shkallë standarde nga 0 në 100."
+    Takes AI flags and converts them into 0-100 scores for the 5 Dimensions.
     """
-    if raw_value > max_val: return 100
-    if raw_value < min_val: return 0
-    return int(((raw_value - min_val) / (max_val - min_val)) * 100)
+    if not ai_data_list:
+        return None
 
-def calculate_paragon_score(metrics):
-    """
-    Faza 3: Ponderimi dhe Agregimi i Pikëzimit
-    Calculates the final weighted score based on the 5 Dimensions.
-    """
-    final_score = 0
-    
-    # 1. Political Engagement (P)
-    final_score += metrics['political_engagement'] * PARAGON_WEIGHTS['political_engagement']
-    
-    # 2. Integrity (A) - The "Veto" Factor
-    # If integrity is dangerously low (<30), it drags the whole score down disproportionately
-    final_score += metrics['integrity'] * PARAGON_WEIGHTS['integrity']
-    
-    # 3. Governance (G)
-    final_score += metrics['governance'] * PARAGON_WEIGHTS['governance']
-    
-    # 4. Communication
-    final_score += metrics['communication'] * PARAGON_WEIGHTS['communication']
-    
-    # 5. Influence (Network)
-    final_score += metrics['influence'] * PARAGON_WEIGHTS['influence']
+    # Buckets for accumulating scores
+    raw_scores = {
+        "political_engagement": [], 
+        "integrity": [], 
+        "governance": [], 
+        "communication": [], 
+        "influence": []
+    }
 
-    return int(final_score)
+    for data in ai_data_list:
+        if not data.is_political_event:
+            continue
 
+        # 1. INTEGRITY (Dimension A)
+        if data.has_corruption_allegation:
+            raw_scores["integrity"].append(20.0) # Penalize heavily
+        else:
+            score = ((data.sentiment_score + 1) / 2) * 100
+            raw_scores["integrity"].append(score)
+
+        # 2. POLITICAL ENGAGEMENT (Dimension P)
+        if data.has_international_endorsement:
+            raw_scores["political_engagement"].append(95.0)
+        elif data.has_legislative_action:
+            raw_scores["political_engagement"].append(80.0)
+        else:
+            raw_scores["political_engagement"].append(50.0)
+
+        # 3. GOVERNANCE (Dimension G)
+        base_gov = ((data.sentiment_score + 1) / 2) * 100
+        if data.has_public_outcry:
+            base_gov -= 20
+        raw_scores["governance"].append(max(0, base_gov))
+
+        # 4. COMMUNICATION & INFLUENCE
+        norm_score = ((data.sentiment_score + 1) / 2) * 100
+        raw_scores["communication"].append(norm_score)
+        raw_scores["influence"].append(norm_score)
+
+    # Aggregate Averages
+    final_metrics = {}
+    for key, val_list in raw_scores.items():
+        if val_list:
+            final_metrics[key] = int(sum(val_list) / len(val_list))
+        else:
+            final_metrics[key] = 50 # Default Neutral
+
+    # Calculate Weighted Overall Score
+    overall = (
+        final_metrics["political_engagement"] * PARAGON_WEIGHTS["political_engagement"] +
+        final_metrics["integrity"] * PARAGON_WEIGHTS["integrity"] +
+        final_metrics["governance"] * PARAGON_WEIGHTS["governance"] +
+        final_metrics["communication"] * PARAGON_WEIGHTS["communication"] +
+        final_metrics["influence"] * PARAGON_WEIGHTS["influence"]
+    )
+
+    return {
+        "overall": int(overall),
+        "breakdown": final_metrics
+    }
+
+# --- PART B: DIAGNOSTIC ALGORITHMS (PIP MATRIX) ---
+# THIS IS THE FUNCTION THAT WAS MISSING
 def calculate_pip_status(structural_vulnerability, behavioral_risk):
     """
-    PROFILI I INTEGRITETIT POLITIK (PIP) - MATRIX 2x2
-    
-    Input:
-    - structural_vulnerability (0-100): From Component A (AGIB)
-    - behavioral_risk (0-100): From Component B (CRI)
-    
-    Output: Quadrant Name & Description
+    Determines the PIP Matrix Quadrant.
     """
     
-    # Logic defining the 4 Quadrants
     is_high_vuln = structural_vulnerability > 50
     is_high_risk = behavioral_risk > 50
 
     if not is_high_vuln and not is_high_risk:
-        return {
-            "quadrant": 1,
-            "title": "Integritet i Qëndrueshëm",
-            "status": "Rrezik i Ulët",
-            "color": "green"
-        }
+        return {"quadrant": 1, "title": "Integritet i Qëndrueshëm", "color": "green"}
     
     elif is_high_vuln and not is_high_risk:
-        return {
-            "quadrant": 2,
-            "title": "Rrezik i Fjetur",
-            "status": "Kërkon Monitorim",
-            "color": "yellow"
-        }
+        return {"quadrant": 2, "title": "Rrezik i Fjetur", "color": "yellow"}
 
     elif not is_high_vuln and is_high_risk:
-        return {
-            "quadrant": 3,
-            "title": "Prirje Shqetësuese",
-            "status": "Rrezik i Moderuar",
-            "color": "orange"
-        }
+        return {"quadrant": 3, "title": "Prirje Shqetësuese", "color": "orange"}
 
     elif is_high_vuln and is_high_risk:
-        return {
-            "quadrant": 4,
-            "title": "ALERT I LARTË INTEGRITETI",
-            "status": "Rrezik i Lartë - Kapje e Shtetit",
-            "color": "red"
-        }
+        return {"quadrant": 4, "title": "ALERT I LARTË INTEGRITETI", "color": "red"}

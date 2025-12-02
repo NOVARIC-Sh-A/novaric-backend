@@ -1,11 +1,12 @@
 import os
 import feedparser
-import statistics
+import urllib.parse  # <--- NEW IMPORT
 from supabase import create_client, Client
 from dotenv import load_dotenv
 
-# IMPORT THE METHODOLOGY LOGIC
-from methodology import calculate_paragon_score, calculate_pip_status, normalize_score
+# IMPORT HYBRID MODULES
+from schemas import AI_Extraction_Output
+from methodology import calculate_hybrid_score, calculate_pip_status 
 
 # 1. SETUP
 load_dotenv()
@@ -13,123 +14,103 @@ url = os.environ.get("SUPABASE_URL")
 key = os.environ.get("SUPABASE_SERVICE_KEY")
 
 if not url or not key:
-    print("❌ Error: Keys missing.")
+    print("❌ Error: Missing Supabase keys in .env")
     exit()
 
 supabase: Client = create_client(url, key)
 
-# 2. CONFIGURATION (Politicians)
-POLITICIANS = [
-    {"id": 1, "name": "Edi Rama", "query": "Edi Rama Albania"},
-    {"id": 2, "name": "Sali Berisha", "query": "Sali Berisha Albania"},
-]
+# FETCH TARGETS FROM DB
+response = supabase.table('politicians').select("id, name").execute()
+POLITICIANS = []
+for row in response.data:
+    POLITICIANS.append({
+        "id": row['id'],
+        "name": row['name'],
+        "query": row['name'] # Default query is the name
+    })
 
-# 3. AI SIMULATION (To be replaced by GPT-4 later)
-def analyze_article_dimensions(text):
-    """
-    Analyzes text and returns scores for the PARAGON dimensions.
-    """
-    text = text.lower()
+print(f"📋 Loaded {len(POLITICIANS)} politicians from database to monitor.")
+
+# 2. AI MOCK (To be replaced by GPT-4)
+def mock_ai_extractor(title):
+    title = title.lower()
     
-    # Mock Analysis Logic based on keywords
-    scores = {
-        "political_engagement": 50, # Neutral start
-        "integrity": 50,
-        "governance": 50,
-        "communication": 50,
-        "influence": 50
-    }
+    # Logic to simulate AI reading
+    is_corruption = "scandal" in title or "spak" in title or "corruption" in title
+    is_eu = "eu" in title or "agreement" in title
+    is_protest = "protest" in title or "clash" in title
+
+    sentiment = 0.0
+    if "success" in title or "win" in title: sentiment = 0.8
+    elif "fail" in title or "bad" in title: sentiment = -0.6
     
-    # Simple Keyword Scoring (Temporary until GPT-4)
-    if "corruption" in text or "spak" in text or "scandal" in text:
-        scores['integrity'] = 20 # Low score
-    if "eu" in text or "integration" in text or "investment" in text:
-        scores['political_engagement'] = 80
-    if "speech" in text or "interview" in text:
-        scores['communication'] = 75
-    if "decree" in text or "law" in text:
-        scores['governance'] = 70
+    return AI_Extraction_Output(
+        is_political_event=True,
+        sentiment_score=sentiment,
+        primary_topic="Politics",
+        has_corruption_allegation=is_corruption,
+        has_legislative_action="law" in title,
+        has_international_endorsement=is_eu,
+        has_public_outcry=is_protest,
+        brief_summary=f"Summary of: {title}"
+    )
 
-    return scores
-
-# 4. MAIN PIPELINE
+# 3. MAIN PIPELINE
 def run_pipeline():
-    print("🚀 Starting PARAGON® Analytical Engine...")
-
-    for politician in POLITICIANS:
-        print(f"\n👤 Processing: {politician['name']}...")
+    print("🚀 Starting PARAGON® Hybrid Pipeline...")
+    
+    for pol in POLITICIANS:
+        print(f"\n🔍 Processing {pol['name']}...")
         
-        # A. EXTRACT (News)
-        rss_url = f"https://news.google.com/rss/search?q={politician['query']}&hl=en-US&gl=US&ceid=US:en"
+        # --- FIX: URL ENCODING ---
+        # We handle spaces properly here (e.g., "Edi Rama" -> "Edi%20Rama")
+        search_term = f"{pol['query']} Albania"
+        encoded_search = urllib.parse.quote(search_term)
+        
+        rss_url = f"https://news.google.com/rss/search?q={encoded_search}&hl=en-US&gl=US&ceid=US:en"
         feed = feedparser.parse(rss_url)
         
-        daily_metrics = {
-            "political_engagement": [],
-            "integrity": [],
-            "governance": [],
-            "communication": [],
-            "influence": []
-        }
+        extracted_data_list = []
         
+        # A. EXTRACT & TRANSFORM (AI Layer)
         print(f"   Found {len(feed.entries)} articles.")
-
-        # B. TRANSFORM (Apply Dimensions)
+        
         for entry in feed.entries[:5]:
-            # Get dimension scores for this article
-            article_scores = analyze_article_dimensions(entry.title)
+            ai_data = mock_ai_extractor(entry.title)
+            extracted_data_list.append(ai_data)
             
             # Save Raw Signal
-            raw_data = {
-                "politician_id": politician['id'],
+            supabase.table('raw_signals').insert({
+                "politician_id": pol['id'],
                 "source_type": "google_news",
-                "content_summary": entry.title,
-                "url": entry.link,
-                # Store the average of dimensions as a proxy for sentiment
-                "sentiment_score": (sum(article_scores.values()) / 5) / 100 
-            }
-            supabase.table('raw_signals').insert(raw_data).execute()
-            
-            # Aggregate data
-            for key, val in article_scores.items():
-                daily_metrics[key].append(val)
+                "content_summary": ai_data.brief_summary,
+                "sentiment_score": ai_data.sentiment_score,
+                "url": entry.link
+            }).execute()
 
-        # C. COMPUTE PARAGON SCORE
-        if daily_metrics['integrity']: # If we have data
+        # B. COMPUTE SCORES (Methodology Layer)
+        result = calculate_hybrid_score(extracted_data_list)
+        
+        if result:
+            breakdown = result['breakdown']
             
-            # 1. Average the daily inputs
-            avg_inputs = {
-                "political_engagement": statistics.mean(daily_metrics['political_engagement']),
-                "integrity": statistics.mean(daily_metrics['integrity']),
-                "governance": statistics.mean(daily_metrics['governance']),
-                "communication": statistics.mean(daily_metrics['communication']),
-                "influence": statistics.mean(daily_metrics['influence']),
-            }
+            # C. DIAGNOSE (PIP Matrix Layer)
+            pip_status = calculate_pip_status(
+                structural_vulnerability=breakdown['influence'],
+                behavioral_risk=(100 - breakdown['integrity'])
+            )
 
-            # 2. Apply Weighted Formula (Methodology)
-            final_paragon_score = calculate_paragon_score(avg_inputs)
+            # D. LOAD (Database Layer)
+            supabase.table('paragon_scores').insert({
+                "politician_id": pol['id'],
+                "overall_score": result['overall'],
+                "leadership": breakdown['governance'],
+                "integrity": breakdown['integrity'],
+                "public_impact": breakdown['communication']
+            }).execute()
             
-            # 3. Calculate PIP (Integrity Matrix)
-            # Using 'integrity' as Behavioral Risk (inverted) and 'influence' as Structural Vulnerability
-            structural = avg_inputs['influence'] 
-            behavioral_risk = 100 - avg_inputs['integrity'] # Low integrity = High risk
-            
-            pip_result = calculate_pip_status(structural, behavioral_risk)
-
-            # D. LOAD (Save to DB)
-            score_entry = {
-                "politician_id": politician['id'],
-                "overall_score": final_paragon_score,
-                "leadership": int(avg_inputs['governance']),
-                "integrity": int(avg_inputs['integrity']),
-                "public_impact": int(avg_inputs['communication'])
-            }
-            
-            supabase.table('paragon_scores').insert(score_entry).execute()
-            
-            print(f"   🏆 PARAGON Score: {final_paragon_score}")
-            print(f"   🛡️ PIP Status: {pip_result['title']} ({pip_result['status']})")
-
-    print("\n✅ Analysis Complete.")
+            print(f"   🏆 Overall Score: {result['overall']}")
+            print(f"   🛡️ Integrity: {breakdown['integrity']} | PIP Status: {pip_status['title']}")
 
 if __name__ == "__main__":
     run_pipeline()

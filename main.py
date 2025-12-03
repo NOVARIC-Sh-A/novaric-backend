@@ -4,12 +4,17 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Dict, Any
 import feedparser
+import os
 
-# --- ARCHITECTURE CHANGE ---
-# We import PROFILES from mock_profiles.
-# NOTE: mock_profiles.py has already run the ParagonEngine logic at startup.
-# So PROFILES contains the real, data-driven scores (Evidence + Logic).
-from mock_profiles import PROFILES
+# =================================================================
+# === ARCHITECTURE CHANGE: Centralized Data Loading (Live/Mock Switch) ===
+# =================================================================
+# Imports the central function that decides whether to load data from 
+# Supabase (LIVE) or local files (MOCK) based on the USE_LIVE_DB ENV variable.
+from utils.data_loader import load_profiles_data 
+
+# PROFILES are loaded once at application startup, determining the source (Mock or Supabase)
+PROFILES = load_profiles_data() 
 
 app = FastAPI(
     title="NOVARIC Backend",
@@ -22,7 +27,8 @@ app = FastAPI(
 # -------------------------------------------------------------
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # WARNING: Restrict this to your frontend URL in production
+    # WARNING: Restrict this to your frontend URL in production
+    allow_origins=["*"],  
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -56,25 +62,28 @@ class NewsArticle(BaseModel):
 # -------------------------------------------------------------
 @app.get("/")
 def root():
+    data_source = "Supabase (Live)" if os.environ.get("USE_LIVE_DB") == "True" else "Local Mocks"
     return {
         "message": "NOVARIC PARAGON Engine is Online", 
         "profiles_loaded": len(PROFILES),
-        "data_source": "Live/Mock Data Loader" # Updated to reflect the new architecture
+        "data_source": data_source,
     }
 
 # -------------------------------------------------------------
-# Profiles Endpoints (No change needed below this line)
+# Profiles Endpoints
 # -------------------------------------------------------------
 @app.get("/api/profiles")
 def get_profiles():
-    # Returns the list of profiles (clinically scored by Engine)
+    """Returns the list of profiles (scores are dynamically loaded/merged at startup)."""
     return PROFILES
 
 @app.get("/api/profiles/{profile_id}")
 def get_profile(profile_id: str):
+    """Retrieves a single profile by ID."""
     # Retrieve profile from the globally loaded PROFILES list
     for p in PROFILES:
-        if p["id"] == profile_id:
+        # NOTE: Profile IDs in PROFILES should be strings for consistency
+        if str(p["id"]) == profile_id:
             return p
     raise HTTPException(status_code=404, detail="Profile not found")
 
@@ -90,7 +99,7 @@ def analyze_profiles(request: AnalysisRequest):
 
     for profile_id in request.ids:
         # Find the profile in our pre-calculated list
-        profile = next((p for p in PROFILES if p["id"] == profile_id), None)
+        profile = next((p for p in PROFILES if str(p["id"]) == profile_id), None)
 
         if not profile:
             continue
@@ -128,7 +137,7 @@ def analyze_profiles(request: AnalysisRequest):
 
 
 # =============================================================
-# === NEWS ENDPOINT (No Changes) ===
+# === NEWS ENDPOINT ===
 # =============================================================
 
 RSS_FEEDS = [
@@ -149,6 +158,7 @@ RSS_FEEDS = [
 
 @app.get("/api/v1/news", response_model=List[NewsArticle])
 async def get_news():
+    """Aggregates and returns recent international news from multiple RSS feeds."""
     articles = []
 
     for url in RSS_FEEDS:
@@ -180,6 +190,7 @@ async def get_news():
                     )
                 )
         except Exception as e:
+            # Log the error but continue to the next feed
             print(f"Error parsing feed {url}: {e}")
             continue
 

@@ -1,42 +1,70 @@
 # utils/supabase_client.py
 import os
-from supabase import create_client, Client
-from typing import List, Dict
-from dotenv import load_dotenv # NEW: Explicitly load environment variables
+from typing import List, Dict, Any
 
-# --- Initialization ---
-load_dotenv() # Load variables from .env file
+from dotenv import load_dotenv
+import requests
 
-# Determine which key to use (API Read Key or Service Role Key)
-SUPABASE_URL: str = os.environ.get("SUPABASE_URL") or os.environ.get("REACT_APP_SUPABASE_URL")
-# Use the Anonymous Key for read-only API access (safer)
-SUPABASE_KEY: str = os.environ.get("SUPABASE_ANON_KEY") or os.environ.get("REACT_APP_SUPABASE_ANON_KEY")
+# --- Load environment variables ---
+load_dotenv()
 
-if not SUPABASE_URL or not SUPABASE_KEY:
-    # If anonymous key is missing, fall back to service key for backend read/write
-    SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
-    if not SUPABASE_KEY:
-        raise Exception("Supabase credentials not found in environment variables.")
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
 
-SUPABASE: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+if not SUPABASE_URL:
+    raise Exception("SUPABASE_URL is not set in environment variables (.env).")
+
+# Prefer service role on backend (for writes); fallback to anon for read-only
+SUPABASE_KEY = SUPABASE_SERVICE_ROLE_KEY or SUPABASE_ANON_KEY
+if not SUPABASE_KEY:
+    raise Exception(
+        "Neither SUPABASE_SERVICE_ROLE_KEY nor SUPABASE_ANON_KEY found in environment."
+    )
+
+REST_URL = f"{SUPABASE_URL.rstrip('/')}/rest/v1"
+
+DEFAULT_HEADERS = {
+    "apikey": SUPABASE_KEY,
+    "Authorization": f"Bearer {SUPABASE_KEY}",
+    "Content-Type": "application/json",
+}
 
 
-def fetch_live_paragon_data() -> List[Dict]:
+def _get(path: str, params: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Internal helper to perform GET requests to Supabase REST."""
+    url = f"{REST_URL}/{path.lstrip('/')}"
+    response = requests.get(url, headers=DEFAULT_HEADERS, params=params, timeout=15)
+
+    # Raise HTTP errors (404, 500, etc.)
+    response.raise_for_status()
+    return response.json()
+
+
+def fetch_live_paragon_data() -> List[Dict[str, Any]]:
     """
-    Fetches and joins profile and paragon data from Supabase.
-    Throws a generic Exception on error, which the caller must handle.
+    Fetch joined PARAGON scores + politician data from Supabase.
+    Equivalent to: select * from paragon_scores join politicians
     """
+    params = {
+        "select": "*,politicians(*)",
+        # You can add filters here, e.g.: "order": "overall_score.desc"
+    }
+
     try:
-        # Note: 'politicians' is assumed to be the name of your secondary table.
-        # The 'select' uses PostgREST syntax for foreign key joins:
-        response = SUPABASE.table('paragon_scores').select('*, politicians(*)').execute()
-        
-        if response.error:
-            # Throw a generic Exception that FastAPI can catch later
-            raise Exception(f"Supabase query failed: {response.error.message}")
-            
-        return response.data
-    
+        data = _get("paragon_scores", params)
+        return data
     except Exception as e:
-        # Re-throw the error for the calling FastAPI function to handle
-        raise Exception(f"Supabase connection or query error: {e}")
+        raise Exception(f"Supabase REST query failed: {e}") from e
+
+
+def fetch_table(table: str, select: str = "*") -> List[Dict[str, Any]]:
+    """
+    Generic helper to fetch any table.
+    Example: fetch_table("politicians")
+    """
+    params = {"select": select}
+    try:
+        return _get(table, params)
+    except Exception as e:
+        raise Exception(f"Supabase REST query on '{table}' failed: {e}") from e

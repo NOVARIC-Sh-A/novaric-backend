@@ -6,20 +6,15 @@ from typing import List, Dict, Any
 import feedparser
 import os
 
-# =================================================================
-# === ARCHITECTURE CHANGE: Centralized Data Loading (Live/Mock Switch) ===
-# =================================================================
-# Imports the central function that decides whether to load data from 
-# Supabase (LIVE) or local files (MOCK) based on the USE_LIVE_DB ENV variable.
-from utils.data_loader import load_profiles_data 
-
-# PROFILES are loaded once at application startup, determining the source (Mock or Supabase)
-PROFILES = load_profiles_data() 
+# ================================================================
+# LIVE / MOCK DYNAMIC LOADING
+# ================================================================
+from utils.data_loader import load_profiles_data
 
 app = FastAPI(
     title="NOVARIC Backend",
     description="Clinical scoring API for NOVARIC® PARAGON System",
-    version="1.2.0",
+    version="1.3.0",
 )
 
 # -------------------------------------------------------------
@@ -27,15 +22,14 @@ app = FastAPI(
 # -------------------------------------------------------------
 app.add_middleware(
     CORSMiddleware,
-    # WARNING: Restrict this to your frontend URL in production
-    allow_origins=["*"],  
+    allow_origins=["*"],   # Restrict in production
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 # -------------------------------------------------------------
-# Models
+# MODELS
 # -------------------------------------------------------------
 class AnalysisRequest(BaseModel):
     ids: List[str]
@@ -58,95 +52,100 @@ class NewsArticle(BaseModel):
     timestamp: str
 
 # -------------------------------------------------------------
-# Root Health Check
+# ROOT HEALTH CHECK
 # -------------------------------------------------------------
 @app.get("/")
 def root():
-    data_source = "Supabase (Live)" if os.environ.get("USE_LIVE_DB") == "True" else "Local Mocks"
+    data_source = (
+        "Supabase (Live)" 
+        if os.environ.get("USE_LIVE_DB") == "True" 
+        else "Local Mocks"
+    )
+    
+    profiles = load_profiles_data()
     return {
-        "message": "NOVARIC PARAGON Engine is Online", 
-        "profiles_loaded": len(PROFILES),
+        "message": "NOVARIC PARAGON Engine is Online",
+        "profiles_loaded": len(profiles),
         "data_source": data_source,
     }
 
 # -------------------------------------------------------------
-# Profiles Endpoints
+# PROFILES ENDPOINTS (LIVE per request)
 # -------------------------------------------------------------
 @app.get("/api/profiles")
 def get_profiles():
-    """Returns the list of profiles (scores are dynamically loaded/merged at startup)."""
-    return PROFILES
+    """Always fetches LIVE data on each request."""
+    profiles = load_profiles_data()
+    return profiles
 
 @app.get("/api/profiles/{profile_id}")
 def get_profile(profile_id: str):
-    """Retrieves a single profile by ID."""
-    # Retrieve profile from the globally loaded PROFILES list
-    for p in PROFILES:
-        # NOTE: Profile IDs in PROFILES should be strings for consistency
+    """Fetch one profile dynamically."""
+    profiles = load_profiles_data()
+    for p in profiles:
         if str(p["id"]) == profile_id:
             return p
     raise HTTPException(status_code=404, detail="Profile not found")
 
 # -------------------------------------------------------------
-# DYNAMIC ANALYSIS BATCH ENDPOINT
+# DYNAMIC ANALYSIS ENDPOINT
 # -------------------------------------------------------------
 @app.post("/api/profiles/analysis-batch", response_model=AnalysisBatchResponse)
 def analyze_profiles(request: AnalysisRequest):
-    """
-    Returns the scores for a list of profile IDs from the pre-calculated PROFILES list.
-    """
+
+    profiles = load_profiles_data()
     results = []
 
     for profile_id in request.ids:
-        # Find the profile in our pre-calculated list
-        profile = next((p for p in PROFILES if str(p["id"]) == profile_id), None)
+        profile = next(
+            (p for p in profiles if str(p["id"]) == profile_id),
+            None
+        )
 
         if not profile:
             continue
-        
-        # --- Logic to extract and format scores from the profile ---
+
         dimensions_map = {}
         total_score = 0
         count = 0
-        
-        # Prioritize Maragon (media profiles) over Paragon (political profiles)
-        paragon_data = profile.get("maragonAnalysis") or profile.get("paragonAnalysis") or []
-        
-        for item in paragon_data:
+
+        # Prefer MARAGON (media analysis) then PARAGON (political analysis)
+        analysis = (
+            profile.get("maragonAnalysis") 
+            or profile.get("paragonAnalysis") 
+            or []
+        )
+
+        for item in analysis:
             dim_name = item.get("dimension")
             score = item.get("score", 0)
-            
-            # Skip if dimension name is missing or score is invalid/not set
             if dim_name and score is not None:
                 dimensions_map[dim_name] = score
                 total_score += score
                 count += 1
-        
-        # Calculate strict average
+
         overall = int(total_score / count) if count > 0 else 0
 
         results.append(
             AnalysisResponseItem(
                 id=profile_id,
                 overallScore=overall,
-                dimensions=dimensions_map
+                dimensions=dimensions_map,
             )
         )
 
     return AnalysisBatchResponse(analyses=results)
 
-
-# =============================================================
-# === NEWS ENDPOINT ===
-# =============================================================
-
+# ================================================================
+# INTERNATIONAL NEWS ENDPOINT
+# ================================================================
 RSS_FEEDS = [
     "https://rss.cnn.com/rss/edition.rss",
-    "https://feeds.bbci.co.uk/news/rss.xml", 
-    "https://rss.nytimes.com/services/xml/rss/nyt/World.xml", 
+    "https://feeds.bbci.co.uk/news/rss.xml",
+    "https://rss.nytimes.com/services/xml/rss/nyt/World.xml",
     "https://www.aljazeera.com/xml/rss/all.xml",
-    "https://news.google.com/rss/search?q=site:reuters.com", 
-    "https://www.theguardian.com/world/rss", 
+    "https://news.google.com/rss/search?q=site:reuters.com",
+    "https://www.theguardian.com/world/rss",
     "https://www.france24.com/en/rss",
     "http://feeds.washingtonpost.com/rss/world",
     "https://time.com/feed",
@@ -158,24 +157,21 @@ RSS_FEEDS = [
 
 @app.get("/api/v1/news", response_model=List[NewsArticle])
 async def get_news():
-    """Aggregates and returns recent international news from multiple RSS feeds."""
     articles = []
 
     for url in RSS_FEEDS:
         try:
-            # Fetch the feed with a timeout (handled by library or socket defaults)
-            feed = feedparser.parse(url) 
-            
-            if feed.bozo and feed.status != 200 and feed.status != 301:
+            feed = feedparser.parse(url)
+            if feed.bozo and feed.status not in (200, 301):
                 continue
 
-            for entry in feed.entries[:5]:  # Limit to 5 per source
-                image_url = ''
-                if 'media_content' in entry and len(entry.media_content) > 0:
-                    image_url = entry.media_content[0].get('url', '')
-                
+            for entry in feed.entries[:5]:
+                image_url = (
+                    entry.media_content[0].get("url", "")
+                    if "media_content" in entry and entry.media_content
+                    else ""
+                )
                 article_id = entry.get("id") or entry.get("link")
-                
                 if not article_id:
                     continue
 
@@ -183,14 +179,13 @@ async def get_news():
                     NewsArticle(
                         id=str(article_id),
                         title=entry.get("title", "No Title"),
-                        content=entry.get("summary", "")[:300] + "...", # Truncate long summaries
+                        content=(entry.get("summary", "")[:300] + "..."),
                         imageUrl=image_url,
                         category="International",
                         timestamp=entry.get("published", "Unknown"),
                     )
                 )
         except Exception as e:
-            # Log the error but continue to the next feed
             print(f"Error parsing feed {url}: {e}")
             continue
 

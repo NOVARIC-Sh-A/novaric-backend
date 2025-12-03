@@ -1,116 +1,107 @@
 import os
-import feedparser
-import urllib.parse  # <--- NEW IMPORT
+from typing import List, Dict, Any
 from supabase import create_client, Client
 from dotenv import load_dotenv
 
-# IMPORT HYBRID MODULES
-from schemas import AI_Extraction_Output
-from methodology import calculate_hybrid_score, calculate_pip_status 
+# Import your utility and scoring modules
+from utils.scoring import generate_paragon_scores_from_metrics
+# NOTE: Assume a new function is needed to transform raw data.
+# from utils.metrics_ingest import ingest_raw_signals 
+from mock_profiles import PROFILES as MOCK_PROFILES 
 
-# 1. SETUP
+
+# --- Supabase Client Initialization ---
 load_dotenv()
-url = os.environ.get("SUPABASE_URL")
-key = os.environ.get("SUPABASE_SERVICE_KEY")
+SUPABASE_URL: str = os.environ.get("SUPABASE_URL")
+# Use the SERVICE_ROLE_KEY for the backend (necessary for database write access)
+SUPABASE_KEY: str = os.environ.get("SUPABASE_SERVICE_ROLE_KEY") 
 
-if not url or not key:
-    print("❌ Error: Missing Supabase keys in .env")
-    exit()
-
-supabase: Client = create_client(url, key)
-
-# FETCH TARGETS FROM DB
-response = supabase.table('politicians').select("id, name").execute()
-POLITICIANS = []
-for row in response.data:
-    POLITICIANS.append({
-        "id": row['id'],
-        "name": row['name'],
-        "query": row['name'] # Default query is the name
-    })
-
-print(f"📋 Loaded {len(POLITICIANS)} politicians from database to monitor.")
-
-# 2. AI MOCK (To be replaced by GPT-4)
-def mock_ai_extractor(title):
-    title = title.lower()
+if not SUPABASE_URL or not SUPABASE_KEY:
+    raise Exception("SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY not found in environment.")
     
-    # Logic to simulate AI reading
-    is_corruption = "scandal" in title or "spak" in title or "corruption" in title
-    is_eu = "eu" in title or "agreement" in title
-    is_protest = "protest" in title or "clash" in title
+SUPABASE: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-    sentiment = 0.0
-    if "success" in title or "win" in title: sentiment = 0.8
-    elif "fail" in title or "bad" in title: sentiment = -0.6
+
+def transform_mock_to_db_format(profiles: List[Dict]) -> List[Dict]:
+    """
+    Transforms the local mock data (for testing) into the format expected 
+    by the Supabase 'paragon_scores' table.
     
-    return AI_Extraction_Output(
-        is_political_event=True,
-        sentiment_score=sentiment,
-        primary_topic="Politics",
-        has_corruption_allegation=is_corruption,
-        has_legislative_action="law" in title,
-        has_international_endorsement=is_eu,
-        has_public_outcry=is_protest,
-        brief_summary=f"Summary of: {title}"
-    )
+    NOTE: In a live system, this function would transform the output of 
+    generate_paragon_scores (which is calculated from raw data) into 
+    the final DB schema. For now, we extract from the mock data's structure.
+    """
+    db_records = []
+    for profile in profiles:
+        # Get the analysis (Paragon or Maragon)
+        analysis_list = profile.get("paragonAnalysis") or profile.get("maragonAnalysis")
+        if not analysis_list:
+            continue
+            
+        # The frontend needs an overall score, so let's calculate/extract it again
+        total_score = sum(item["score"] for item in analysis_list)
+        overall_score = round(total_score / len(analysis_list))
+        
+        # Prepare the dimensions as a JSON object (Postgres JSONB column)
+        dimension_data = {
+            item["dimension"]: {
+                "score": item["score"],
+                "peerAverage": item["peerAverage"],
+                "commentary": item["commentary"],
+            } for item in analysis_list
+        }
+        
+        db_records.append({
+            "profile_id": profile["id"], # Assuming this matches the 'politicians' table FK
+            "overall_score": overall_score,
+            "profile_name": profile["name"], # Denormalize for easier reading/querying
+            "dimension_scores": dimension_data,
+            "last_updated": "now()", # Supabase should handle this automatically
+        })
+        
+    return db_records
 
-# 3. MAIN PIPELINE
-def run_pipeline():
-    print("🚀 Starting PARAGON® Hybrid Pipeline...")
+
+def run_etl_pipeline():
+    """
+    1. EXTRACT: Scrape and fetch raw data (MOCK STAGE)
+    2. TRANSFORM: Calculate scores (MOCK STAGE)
+    3. LOAD: Write scores to Supabase (LIVE STAGE)
+    """
+    print("--- Starting NOVARIC ETL Pipeline ---")
     
-    for pol in POLITICIANS:
-        print(f"\n🔍 Processing {pol['name']}...")
-        
-        # --- FIX: URL ENCODING ---
-        # We handle spaces properly here (e.g., "Edi Rama" -> "Edi%20Rama")
-        search_term = f"{pol['query']} Albania"
-        encoded_search = urllib.parse.quote(search_term)
-        
-        rss_url = f"https://news.google.com/rss/search?q={encoded_search}&hl=en-US&gl=US&ceid=US:en"
-        feed = feedparser.parse(rss_url)
-        
-        extracted_data_list = []
-        
-        # A. EXTRACT & TRANSFORM (AI Layer)
-        print(f"   Found {len(feed.entries)} articles.")
-        
-        for entry in feed.entries[:5]:
-            ai_data = mock_ai_extractor(entry.title)
-            extracted_data_list.append(ai_data)
-            
-            # Save Raw Signal
-            supabase.table('raw_signals').insert({
-                "politician_id": pol['id'],
-                "source_type": "google_news",
-                "content_summary": ai_data.brief_summary,
-                "sentiment_score": ai_data.sentiment_score,
-                "url": entry.link
-            }).execute()
+    # === 1 & 2. MOCK EXTRACT & TRANSFORM STAGE (Using static PROFILES for now) ===
+    # Replace the following line when integrating real scrapers:
+    # final_scored_profiles = generate_paragon_scores_from_metrics(...)
+    final_scored_profiles = MOCK_PROFILES
+    
+    # Transform to the required Supabase format (matching the target table schema)
+    db_records = transform_mock_to_db_format(final_scored_profiles)
 
-        # B. COMPUTE SCORES (Methodology Layer)
-        result = calculate_hybrid_score(extracted_data_list)
-        
-        if result:
-            breakdown = result['breakdown']
-            
-            # C. DIAGNOSE (PIP Matrix Layer)
-            pip_status = calculate_pip_status(
-                structural_vulnerability=breakdown['influence'],
-                behavioral_risk=(100 - breakdown['integrity'])
-            )
+    if not db_records:
+        print("Pipeline finished: No records to update.")
+        return
 
-            # D. LOAD (Database Layer)
-            supabase.table('paragon_scores').insert({
-                "politician_id": pol['id'],
-                "overall_score": result['overall'],
-                "leadership": breakdown['governance'],
-                "integrity": breakdown['integrity'],
-                "public_impact": breakdown['communication']
-            }).execute()
-            
-            print(f"   🏆 Overall Score: {result['overall']}")
-            print(f"   🛡️ Integrity: {breakdown['integrity']} | PIP Status: {pip_status['title']}")
+    # === 3. LIVE LOAD STAGE: Write to Supabase ===
+    try:
+        # Use the upsert method: insert if profile_id doesn't exist, update if it does
+        # NOTE: 'profile_id' must be the primary key or a unique column in 'paragon_scores'
+        response = SUPABASE.table('paragon_scores').upsert(
+            db_records, 
+            on_conflict='profile_id' # CRITICAL: Replace with your actual unique constraint/PK
+        ).execute()
+        
+        if response.error:
+            raise Exception(f"Supabase write error: {response.error.message}")
+
+        print(f"Pipeline Succeeded: Successfully UPSERTED {len(db_records)} records to 'paragon_scores'.")
+        
+    except Exception as e:
+        print(f"Pipeline FAILED at LOAD stage: {e}")
+        # Optional: send alert/notification
+
+    print("--- ETL Pipeline Finished ---")
+
 
 if __name__ == "__main__":
-    run_pipeline()
+    run_etl_pipeline()

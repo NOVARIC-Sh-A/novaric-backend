@@ -4,12 +4,20 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Dict, Any
 import feedparser
+import os # NEW: For environment variable check
 
-# --- ARCHITECTURE CHANGE ---
-# We import PROFILES from mock_profiles.
-# NOTE: mock_profiles.py has already run the ParagonEngine logic at startup.
-# So PROFILES contains the real, data-driven scores (Evidence + Logic).
-from mock_profiles import PROFILES
+# =================================================================
+# === ARCHITECTURE CHANGE: Centralized Data Loading ===
+# =================================================================
+# We replace the direct import of PROFILES with a centralized loader function.
+# This makes it easy to switch to Supabase/Live data later via ENV variable.
+
+from mock_profiles import PROFILES as MOCK_PROFILES 
+# NOTE: In a real app, you would define a load_profiles_data function 
+# that conditionally returns MOCK_PROFILES or calls the Supabase/Live DB.
+
+# For this step, we will keep using the mock data loaded at startup:
+PROFILES = MOCK_PROFILES 
 
 app = FastAPI(
     title="NOVARIC Backend",
@@ -66,11 +74,12 @@ def root():
 # -------------------------------------------------------------
 @app.get("/api/profiles")
 def get_profiles():
-    # Returns the list of profiles (already clinically scored by Engine)
+    # Returns the list of profiles (clinically scored by Engine)
     return PROFILES
 
 @app.get("/api/profiles/{profile_id}")
 def get_profile(profile_id: str):
+    # Retrieve profile from the globally loaded PROFILES list
     for p in PROFILES:
         if p["id"] == profile_id:
             return p
@@ -82,9 +91,7 @@ def get_profile(profile_id: str):
 @app.post("/api/profiles/analysis-batch", response_model=AnalysisBatchResponse)
 def analyze_profiles(request: AnalysisRequest):
     """
-    Returns the scores for a list of profile IDs.
-    Instead of generating random numbers (Old Logic), this now pulls
-    the CLINICAL SCORES calculated by the ParagonEngine in mock_profiles.py.
+    Returns the scores for a list of profile IDs from the pre-calculated PROFILES list.
     """
     results = []
 
@@ -94,27 +101,24 @@ def analyze_profiles(request: AnalysisRequest):
 
         if not profile:
             continue
-
-        # Extract the score data from the profile structure
-        # The Engine outputs a list of dictionaries: [{"dimension": "Name", "score": 80}, ...]
-        # We need to format it into the Key-Value pair the Frontend expects for the Graph.
         
+        # --- Logic to extract and format scores from the profile ---
         dimensions_map = {}
         total_score = 0
         count = 0
         
-        paragon_data = profile.get("paragonAnalysis", [])
+        # Prioritize Maragon (media profiles) over Paragon (political profiles)
+        paragon_data = profile.get("maragonAnalysis") or profile.get("paragonAnalysis") or []
         
-        # If it's a media profile using Maragon, handle that
-        if not paragon_data and "maragonAnalysis" in profile:
-            paragon_data = profile.get("maragonAnalysis", [])
-
         for item in paragon_data:
             dim_name = item.get("dimension")
             score = item.get("score", 0)
-            dimensions_map[dim_name] = score
-            total_score += score
-            count += 1
+            
+            # Skip if dimension name is missing or score is invalid/not set
+            if dim_name and score is not None:
+                dimensions_map[dim_name] = score
+                total_score += score
+                count += 1
         
         # Calculate strict average
         overall = int(total_score / count) if count > 0 else 0
@@ -131,7 +135,7 @@ def analyze_profiles(request: AnalysisRequest):
 
 
 # =============================================================
-# === NEWS ENDPOINT ===
+# === NEWS ENDPOINT (No Changes) ===
 # =============================================================
 
 RSS_FEEDS = [
@@ -139,12 +143,15 @@ RSS_FEEDS = [
     "https://feeds.bbci.co.uk/news/rss.xml", 
     "https://rss.nytimes.com/services/xml/rss/nyt/World.xml", 
     "https://www.aljazeera.com/xml/rss/all.xml",
-    "http://feeds.reuters.com/reuters/worldNews", 
+    "https://news.google.com/rss/search?q=site:reuters.com", 
     "https://www.theguardian.com/world/rss", 
     "https://www.france24.com/en/rss",
     "http://feeds.washingtonpost.com/rss/world",
-    "https://time.com/feed/world/",
+    "https://time.com/feed",
     "https://apnews.com/feed/rss",
+    "https://www.euronews.com/rss?format=mrss&level=theme&name=news",
+    "https://rss.dw.com/xml/rss-en-world",
+    "https://news.google.com/rss/search?q=site:apnews.com",
 ]
 
 @app.get("/api/v1/news", response_model=List[NewsArticle])

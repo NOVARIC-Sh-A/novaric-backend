@@ -4,21 +4,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Dict, Any
 import feedparser
-import os
 
-# --- OLD ARCHITECTURE: Commented out the old direct import ---
-# from mock_profiles import PROFILES as MOCK_PROFILES 
-# PROFILES = MOCK_PROFILES 
-
-# =================================================================
-# === NEW ARCHITECTURE: Centralized Data Loading (Live/Mock Switch) ===
-# =================================================================
-# NOTE: You MUST create a data_loader.py file in your utilities path
-# with the function 'load_profiles_data' that handles the live/mock logic.
-from utils.data_loader import load_profiles_data 
-
-# PROFILES are loaded once at application startup, determining the source (Mock or Supabase)
-PROFILES = load_profiles_data() 
+# --- ARCHITECTURE CHANGE ---
+# We import PROFILES from mock_profiles.
+# NOTE: mock_profiles.py has already run the ParagonEngine logic at startup.
+# So PROFILES contains the real, data-driven scores (Evidence + Logic).
+from mock_profiles import PROFILES
 
 app = FastAPI(
     title="NOVARIC Backend",

@@ -1,17 +1,14 @@
-# Use a lightweight Python runtime
+# Use a lightweight and stable Python runtime
 FROM python:3.10-slim
 
-# Create application directory
+# Set application working directory
 WORKDIR /app
 
-# Install system dependencies if needed (uncomment as required)
-# RUN apt-get update && apt-get install -y build-essential
-
-# Copy ONLY requirements first (to optimize build caching)
+# Copy requirements first for Docker caching
 COPY novaric-backend/requirements.txt /app/requirements.txt
 
-# Install Python packages
-RUN pip install --no-cache-dir -r requirements.txt
+# Install dependencies
+RUN pip install --no-cache-dir -r /app/requirements.txt
 
 # Copy backend source code
 COPY novaric-backend/ /app/
@@ -20,5 +17,5 @@ COPY novaric-backend/ /app/
 ENV PORT=8080
 EXPOSE 8080
 
-# Start FastAPI using uvicorn
+# Start FastAPI using uvicorn (Cloud Run compliant)
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]

@@ -4,33 +4,30 @@ import os
 
 router = APIRouter()
 
-# --------------------------------------------------------
-# Load correct environment variables
-# MUST MATCH Cloud Run configuration exactly
-# --------------------------------------------------------
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
 
-if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
-    raise Exception("❌ Supabase environment variables are not set correctly in Cloud Run.")
+supabase = None
 
-# Create Supabase client
-supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+# Try connecting but DO NOT crash the app
+if SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY:
+    try:
+        supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+        print("✅ Visitor counter: Supabase connected")
+    except Exception as e:
+        print("⚠️ Visitor counter disabled:", e)
+else:
+    print("⚠️ Visitor counter disabled: missing env vars")
 
 
 @router.get("/visit")
 def record_visit():
-    """
-    Calls the Supabase RPC increment_visit()
-    and returns the updated global visitor count.
-    """
+    if not supabase:
+        return {"count": 0}
+
     try:
         result = supabase.rpc("increment_visit", {}).execute()
-
-        if result.error:
-            raise HTTPException(status_code=500, detail=result.error.message)
-
-        return {"count": result.data}
-
+        return {"count": result.data if result.data else 0}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print("⚠️ Visitor counter RPC failed:", e)
+        return {"count": 0}

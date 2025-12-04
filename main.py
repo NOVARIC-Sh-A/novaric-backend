@@ -1,12 +1,15 @@
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import List, Dict, Any
+from typing import List, Dict
 import feedparser
 import os
 
 # Supabase client
 from supabase import create_client, Client
+
+# Routers
+from utils.visit import router as visit_router
 
 # Dynamic data loader
 from utils.data_loader import load_profiles_data
@@ -18,7 +21,7 @@ from utils.data_loader import load_profiles_data
 app = FastAPI(
     title="NOVARIC Backend",
     description="Clinical scoring API for NOVARIC® PARAGON System",
-    version="1.3.3",
+    version="1.3.4",
 )
 
 
@@ -45,11 +48,18 @@ else:
 # ================================================================
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],   # Replace "*" with your production domain later
+    allow_origins=["*"],   # Replace with prod domain later
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# ================================================================
+# REGISTER ROUTERS
+# ================================================================
+# /api/visit → now served from utils/visit.py
+app.include_router(visit_router, prefix="/api")
 
 
 # ================================================================
@@ -90,32 +100,6 @@ def root():
         "data_source": "Supabase (Live)" if os.environ.get("USE_LIVE_DB") == "True" else "Local Mocks",
         "visitor_counter": "Active" if supabase else "Inactive",
     }
-
-
-# ================================================================
-# VISITOR COUNTER (Supabase RPC)
-# ================================================================
-@app.get("/api/visit")
-def track_visit(request: Request):
-    """
-    Atomically increments global visit count using Supabase RPC:
-        increment_visit()
-    """
-
-    if not supabase:
-        return {"count": None, "error": "Supabase unavailable"}
-
-    try:
-        result = supabase.rpc("increment_visit", {}).execute()
-
-        if result.error:
-            raise Exception(result.error.message)
-
-        return {"count": result.data}
-
-    except Exception as e:
-        print(f"Visitor Counter Error: {e}")
-        return {"count": None}
 
 
 # ================================================================

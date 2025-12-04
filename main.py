@@ -1,10 +1,13 @@
 # main.py
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Dict, Any
 import feedparser
 import os
+
+# ### NEW ADDITION: Supabase Import (Replaces Redis) ###
+from supabase import create_client, Client
 
 # ================================================================
 # LIVE / MOCK DYNAMIC LOADING
@@ -14,15 +17,35 @@ from utils.data_loader import load_profiles_data
 app = FastAPI(
     title="NOVARIC Backend",
     description="Clinical scoring API for NOVARIC® PARAGON System",
-    version="1.3.0",
+    version="1.3.2", # Bumped version for Supabase Integration
 )
+
+# -------------------------------------------------------------
+# ### NEW ADDITION: Supabase Connection Setup ###
+# -------------------------------------------------------------
+# Connects to your existing Supabase project.
+# Ensure these ENV variables are set in Cloud Run.
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY") # Use Service Role or Anon Key
+
+supabase: Client = None
+
+if SUPABASE_URL and SUPABASE_KEY:
+    try:
+        supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+        print("✅ Connected to Supabase for Visitor Counting")
+    except Exception as e:
+        print(f"⚠️ Warning: Could not connect to Supabase: {e}")
+else:
+    print("⚠️ Warning: SUPABASE_URL or SUPABASE_KEY not set.")
 
 # -------------------------------------------------------------
 # CORS
 # -------------------------------------------------------------
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],   # Restrict in production
+    # In production, replace "*" with your specific Frontend URL
+    allow_origins=["*"],   
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -67,7 +90,35 @@ def root():
         "message": "NOVARIC PARAGON Engine is Online",
         "profiles_loaded": len(profiles),
         "data_source": data_source,
+        "visitor_counter_status": "Active" if supabase else "Inactive"
     }
+
+# -------------------------------------------------------------
+# ### NEW ADDITION: Visitor Counter Endpoint (Supabase RPC) ###
+# -------------------------------------------------------------
+@app.get("/api/visit")
+def track_visit(request: Request):
+    """
+    Increments visitor count atomically using Supabase RPC.
+    This removes the need for Redis.
+    """
+    if not supabase:
+        return {"count": 0, "error": "Database unavailable"}
+
+    try:
+        # Call the Stored Procedure 'increment_visitor' on Supabase
+        # This function handles the +1 math safely inside the database
+        response = supabase.rpc('increment_visitor', {}).execute()
+        
+        # supabase-py returns the result in response.data
+        new_count = response.data 
+        
+        return {"count": new_count if new_count is not None else 0}
+            
+    except Exception as e:
+        print(f"Visitor Error: {e}")
+        # Fail gracefully so the website doesn't crash
+        return {"count": 0}
 
 # -------------------------------------------------------------
 # PROFILES ENDPOINTS (LIVE per request)
@@ -92,7 +143,6 @@ def get_profile(profile_id: str):
 # -------------------------------------------------------------
 @app.post("/api/profiles/analysis-batch", response_model=AnalysisBatchResponse)
 def analyze_profiles(request: AnalysisRequest):
-
     profiles = load_profiles_data()
     results = []
 
@@ -109,7 +159,6 @@ def analyze_profiles(request: AnalysisRequest):
         total_score = 0
         count = 0
 
-        # Prefer MARAGON (media analysis) then PARAGON (political analysis)
         analysis = (
             profile.get("maragonAnalysis") 
             or profile.get("paragonAnalysis") 
@@ -136,9 +185,9 @@ def analyze_profiles(request: AnalysisRequest):
 
     return AnalysisBatchResponse(analyses=results)
 
-# ================================================================
+# -------------------------------------------------------------
 # INTERNATIONAL NEWS ENDPOINT
-# ================================================================
+# -------------------------------------------------------------
 RSS_FEEDS = [
     "https://rss.cnn.com/rss/edition.rss",
     "https://feeds.bbci.co.uk/news/rss.xml",
@@ -158,7 +207,7 @@ RSS_FEEDS = [
 @app.get("/api/v1/news", response_model=List[NewsArticle])
 async def get_news():
     articles = []
-
+    
     for url in RSS_FEEDS:
         try:
             feed = feedparser.parse(url)

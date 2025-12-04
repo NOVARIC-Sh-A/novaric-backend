@@ -1,106 +1,120 @@
 import os
+import json
 from typing import List, Dict, Any
 from supabase import create_client, Client
 from dotenv import load_dotenv
 
-# Import your utility and scoring modules
-from utils.scoring import generate_paragon_scores_from_metrics
-# NOTE: Assume a new function is needed to transform raw data.
-# from utils.metrics_ingest import ingest_raw_signals 
-from mock_profiles import PROFILES as MOCK_PROFILES 
+# NEW ENGINE + METRICS
+from utils.data_loader import load_raw_profiles
+from utils.metrics_loader import load_all_metrics
+from utils.paragon_engine import run_paragon_analysis
 
-
-# --- Supabase Client Initialization ---
+# LOAD ENV
 load_dotenv()
-SUPABASE_URL: str = os.environ.get("SUPABASE_URL")
-# Use the SERVICE_ROLE_KEY for the backend (necessary for database write access)
-SUPABASE_KEY: str = os.environ.get("SUPABASE_SERVICE_ROLE_KEY") 
+
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
 
 if not SUPABASE_URL or not SUPABASE_KEY:
-    raise Exception("SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY not found in environment.")
-    
+    raise Exception("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY")
+
 SUPABASE: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
+OUTPUT_DIR = "data/export"
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+OUTPUT_FILE = f"{OUTPUT_DIR}/profiles.json"
 
-def transform_mock_to_db_format(profiles: List[Dict]) -> List[Dict]:
+
+# ------------------------------------------------------------
+# TRANSFORM STEP FOR SUPABASE RECORDS
+# ------------------------------------------------------------
+
+def transform_profile_for_db(profile: Dict[str, Any]) -> Dict:
     """
-    Transforms the local mock data (for testing) into the format expected 
-    by the Supabase 'paragon_scores' table.
-    
-    NOTE: In a live system, this function would transform the output of 
-    generate_paragon_scores (which is calculated from raw data) into 
-    the final DB schema. For now, we extract from the mock data's structure.
+    Converts PARAGON engine output to the DB schema for 'paragon_scores'.
     """
-    db_records = []
-    for profile in profiles:
-        # Get the analysis (Paragon or Maragon)
-        analysis_list = profile.get("paragonAnalysis") or profile.get("maragonAnalysis")
-        if not analysis_list:
-            continue
-            
-        # The frontend needs an overall score, so let's calculate/extract it again
-        total_score = sum(item["score"] for item in analysis_list)
-        overall_score = round(total_score / len(analysis_list))
-        
-        # Prepare the dimensions as a JSON object (Postgres JSONB column)
-        dimension_data = {
-            item["dimension"]: {
-                "score": item["score"],
-                "peerAverage": item["peerAverage"],
-                "commentary": item["commentary"],
-            } for item in analysis_list
+
+    analysis = profile.get("paragonAnalysis") or []
+    if not analysis:
+        return None
+
+    total_score = sum(item["score"] for item in analysis)
+    overall_score = round(total_score / len(analysis))
+
+    dimension_scores = {
+        item["dimension"]: {
+            "score": item["score"],
+            "peerAverage": item["peerAverage"],
+            "commentary": item["commentary"],
         }
-        
-        db_records.append({
-            "profile_id": profile["id"], # Assuming this matches the 'politicians' table FK
-            "overall_score": overall_score,
-            "profile_name": profile["name"], # Denormalize for easier reading/querying
-            "dimension_scores": dimension_data,
-            "last_updated": "now()", # Supabase should handle this automatically
-        })
-        
-    return db_records
+        for item in analysis
+    }
 
+    return {
+        "profile_id": profile["id"],
+        "profile_name": profile["name"],
+        "overall_score": overall_score,
+        "dimension_scores": dimension_scores,
+        "last_updated": "now()"  # Postgres will evaluate this to NOW()
+    }
+
+
+# ------------------------------------------------------------
+# FULL ETL PIPELINE
+# ------------------------------------------------------------
 
 def run_etl_pipeline():
-    """
-    1. EXTRACT: Scrape and fetch raw data (MOCK STAGE)
-    2. TRANSFORM: Calculate scores (MOCK STAGE)
-    3. LOAD: Write scores to Supabase (LIVE STAGE)
-    """
-    print("--- Starting NOVARIC ETL Pipeline ---")
-    
-    # === 1 & 2. MOCK EXTRACT & TRANSFORM STAGE (Using static PROFILES for now) ===
-    # Replace the following line when integrating real scrapers:
-    # final_scored_profiles = generate_paragon_scores_from_metrics(...)
-    final_scored_profiles = MOCK_PROFILES
-    
-    # Transform to the required Supabase format (matching the target table schema)
-    db_records = transform_mock_to_db_format(final_scored_profiles)
+    print("🚀 NOVARIC ETL PIPELINE STARTED")
+    print("=================================================")
 
-    if not db_records:
-        print("Pipeline finished: No records to update.")
-        return
+    # 1) LOAD RAW PROFILES (name, party, images, socials)
+    profiles = load_raw_profiles()
+    print(f"✔ Loaded {len(profiles)} raw profiles")
 
-    # === 3. LIVE LOAD STAGE: Write to Supabase ===
+    # 2) LOAD ALL METRICS (bio, media, social)
+    metrics = load_all_metrics()
+    print(f"✔ Loaded metrics: {list(metrics.keys())}")
+
+    # 3) RUN PARAGON ENGINE
+    enriched_profiles = []
+    for p in profiles:
+        enriched = run_paragon_analysis(p, metrics)
+        enriched_profiles.append(enriched)
+
+    print(f"✔ PARAGON analysis completed for {len(enriched_profiles)} profiles")
+
+    # 4) EXPORT TO LOCAL (for frontend & debugging)
+    with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
+        json.dump(enriched_profiles, f, indent=2, ensure_ascii=False)
+
+    print(f"✔ Local dataset written to {OUTPUT_FILE}")
+
+    # 5) TRANSFORM FOR SUPABASE
+    db_records = []
+    for p in enriched_profiles:
+        transformed = transform_profile_for_db(p)
+        if transformed:
+            db_records.append(transformed)
+
+    print(f"✔ Prepared {len(db_records)} database records")
+
+    # 6) LOAD INTO SUPABASE
+    print("⬆ Uploading to Supabase 'paragon_scores'…")
+
     try:
-        # Use the upsert method: insert if profile_id doesn't exist, update if it does
-        # NOTE: 'profile_id' must be the primary key or a unique column in 'paragon_scores'
-        response = SUPABASE.table('paragon_scores').upsert(
-            db_records, 
-            on_conflict='profile_id' # CRITICAL: Replace with your actual unique constraint/PK
+        response = SUPABASE.table("paragon_scores").upsert(
+            db_records,
+            on_conflict="profile_id"
         ).execute()
-        
-        if response.error:
-            raise Exception(f"Supabase write error: {response.error.message}")
 
-        print(f"Pipeline Succeeded: Successfully UPSERTED {len(db_records)} records to 'paragon_scores'.")
-        
+        print(f"🎯 ETL SUCCESS — {len(db_records)} profiles written to Supabase")
+
     except Exception as e:
-        print(f"Pipeline FAILED at LOAD stage: {e}")
-        # Optional: send alert/notification
+        print("❌ ETL FAILED — Error uploading to Supabase")
+        print(e)
 
-    print("--- ETL Pipeline Finished ---")
+    print("=================================================")
+    print("🚀 ETL PIPELINE FINISHED")
 
 
 if __name__ == "__main__":

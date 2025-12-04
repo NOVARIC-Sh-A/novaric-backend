@@ -4,14 +4,18 @@ import os
 
 router = APIRouter()
 
-# Safely load env variables
+# --------------------------------------------------------
+# Load correct environment variables
+# MUST MATCH Cloud Run configuration exactly
+# --------------------------------------------------------
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
-SSUPABASE_SERVICE_ROLE_KEY = os.environ.get("SSUPABASE_SERVICE_ROLE_KEY")
+SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
 
-if not SUPABASE_URL or not SSUPABASE_SERVICE_ROLE_KEY:
-    raise Exception("Supabase environment variables are not set")
+if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+    raise Exception("❌ Supabase environment variables are not set correctly in Cloud Run.")
 
-supabase = create_client(SUPABASE_URL, SSUPABASE_SERVICE_ROLE_KEY)
+# Create Supabase client
+supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
 
 @router.get("/visit")
@@ -26,7 +30,6 @@ def record_visit():
         if result.error:
             raise HTTPException(status_code=500, detail=result.error.message)
 
-        # Consistent with the frontend: return 'count'
         return {"count": result.data}
 
     except Exception as e:

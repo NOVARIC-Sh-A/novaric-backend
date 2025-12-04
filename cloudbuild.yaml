@@ -4,27 +4,27 @@ options:
   dynamicSubstitutions: true
 
 substitutions:
-  # Backend Config
+  # Backend
   _SERVICE_NAME: "novaric-backend"
   _IMAGE_NAME: "novaric-backend"
-  
-  # Frontend Config
+
+  # Frontend
   _SERVICE_NAME_FE: "novaric-frontend"
   _IMAGE_NAME_FE: "novaric-frontend"
 
-  # Shared Config
+  # Shared
   _REGION: "europe-west1"
   _AR_REPO: "cloud-run-source-deploy"
 
-  # Supabase Secrets (IMPORTANT: Set real values in Cloud Build Trigger)
-  _SUPABASE_URL: "your-supabase-url-here"
-  _SSUPABASE_SERVICE_ROLE_KEY: "your-supabase-service-key-here"
+  # Supabase (set real values in Cloud Build Trigger)
+  _SUPABASE_URL: "your-supabase-url"
+  _SUPABASE_SERVICE_ROLE_KEY: "your-supabase-service-role-key"
 
 steps:
 
-  # ==========================================
-  # 1. BUILD BACKEND CONTAINER
-  # ==========================================
+  # =====================================================
+  # 1. BUILD BACKEND (correct build context)
+  # =====================================================
   - name: "gcr.io/cloud-builders/docker"
     id: "Build Backend"
     args:
@@ -33,7 +33,7 @@ steps:
         "-t", "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_IMAGE_NAME}:$SHORT_SHA",
         "-t", "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_IMAGE_NAME}:latest",
         "--cache-from", "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_IMAGE_NAME}:latest",
-        "."
+        "novaric-backend"
       ]
 
   - name: "gcr.io/cloud-builders/docker"
@@ -44,9 +44,9 @@ steps:
         "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_IMAGE_NAME}:$SHORT_SHA"
       ]
 
-  # ==========================================
-  # 2. DEPLOY BACKEND TO CLOUD RUN
-  # ==========================================
+  # =====================================================
+  # 2. DEPLOY BACKEND (with correct environment variables)
+  # =====================================================
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
     id: "Deploy Backend"
     entrypoint: gcloud
@@ -60,16 +60,16 @@ steps:
         "--port=8080",
         "--memory=512Mi",
         "--cpu=1",
-        "--set-env-vars=SUPABASE_URL=${_SUPABASE_URL},SSUPABASE_SERVICE_ROLE_KEY=${_SSUPABASE_SERVICE_ROLE_KEY},USE_LIVE_DB=True"
+        "--set-env-vars=SUPABASE_URL=${_SUPABASE_URL},SUPABASE_SERVICE_ROLE_KEY=${_SUPABASE_SERVICE_ROLE_KEY},USE_LIVE_DB=True"
       ]
 
-  # ==========================================
-  # 3. BUILD FRONTEND CONTAINER
-  # ==========================================
+  # =====================================================
+  # 3. BUILD FRONTEND (correct folder)
+  # =====================================================
   - name: "gcr.io/cloud-builders/docker"
     id: "Build Frontend"
-    dir: "frontend"
-    waitFor: ['-']  # run in parallel
+    dir: "novaric-frontend"
+    waitFor: ["-"]
     args:
       [
         "build",
@@ -88,9 +88,9 @@ steps:
         "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_IMAGE_NAME_FE}:$SHORT_SHA"
       ]
 
-  # ==========================================
+  # =====================================================
   # 4. DEPLOY FRONTEND
-  # ==========================================
+  # =====================================================
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
     id: "Deploy Frontend"
     waitFor: ["Push Frontend"]

@@ -21,21 +21,21 @@ from utils.data_loader import load_profiles_data
 app = FastAPI(
     title="NOVARIC Backend",
     description="Clinical scoring API for NOVARIC® PARAGON System",
-    version="1.3.4",
+    version="1.3.5",
 )
 
 
 # ================================================================
-# SUPABASE INITIALIZATION (FIXED)
+# SUPABASE INITIALIZATION (CORRECTED)
 # ================================================================
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
-SSUPABASE_SERVICE_ROLE_KEY = os.environ.get("SSUPABASE_SERVICE_ROLE_KEY")  # MUST MATCH Cloud Run
+SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")  # MUST MATCH Cloud Run
 
 supabase: Client | None = None
 
-if SUPABASE_URL and SSUPABASE_SERVICE_ROLE_KEY:
+if SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY:
     try:
-        supabase = create_client(SUPABASE_URL, SSUPABASE_SERVICE_ROLE_KEY)
+        supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
         print("✅ Supabase connection established.")
     except Exception as e:
         print(f"⚠️ Failed to initialize Supabase: {e}")
@@ -48,7 +48,7 @@ else:
 # ================================================================
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],   # Replace with prod domain later
+    allow_origins=["*"],   # Replace "*" with your production domain
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -58,7 +58,7 @@ app.add_middleware(
 # ================================================================
 # REGISTER ROUTERS
 # ================================================================
-# /api/visit → now served from utils/visit.py
+# /api/visit → Visitor counter
 app.include_router(visit_router, prefix="/api")
 
 
@@ -90,14 +90,18 @@ class NewsArticle(BaseModel):
 
 
 # ================================================================
-# HEALTH CHECK
+# HEALTH CHECK ENDPOINT
 # ================================================================
 @app.get("/")
 def root():
     return {
         "message": "NOVARIC PARAGON Engine is Online",
         "profiles_loaded": len(load_profiles_data()),
-        "data_source": "Supabase (Live)" if os.environ.get("USE_LIVE_DB") == "True" else "Local Mocks",
+        "data_source": (
+            "Supabase (Live)" 
+            if os.environ.get("USE_LIVE_DB") == "True" 
+            else "Local Mocks"
+        ),
         "visitor_counter": "Active" if supabase else "Inactive",
     }
 

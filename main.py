@@ -68,7 +68,6 @@ def root():
             if os.environ.get("USE_LIVE_DB") == "True"
             else "Local Mocks"
         ),
-        "visit_system": "Disabled",  # Visitor counter removed safely
     }
 
 # ================================================================

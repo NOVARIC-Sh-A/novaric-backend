@@ -9,7 +9,6 @@ import os
 from supabase import create_client, Client
 
 # Routers
-from utils.visit import router as visit_router
 
 # Dynamic data loader
 from utils.data_loader import load_profiles_data
@@ -53,14 +52,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-
-# ================================================================
-# REGISTER ROUTERS
-# ================================================================
-# /api/visit (visitor counter)
-app.include_router(visit_router, prefix="/api")
-
 
 # ================================================================
 # MODELS

@@ -5,49 +5,24 @@ from typing import List, Dict
 import feedparser
 import os
 
-# Supabase client
-from supabase import create_client, Client
-
-# Routers
-
 # Dynamic data loader
 from utils.data_loader import load_profiles_data
 
-
 # ================================================================
-# FASTAPI CONFIGURATION
+# FASTAPI APP CONFIGURATION
 # ================================================================
 app = FastAPI(
     title="NOVARIC Backend",
     description="Clinical scoring API for NOVARIC® PARAGON System",
-    version="1.3.5",
+    version="1.4.0",
 )
-
-
-# ================================================================
-# SUPABASE INITIALIZATION (SAFE)
-# ================================================================
-SUPABASE_URL = os.environ.get("SUPABASE_URL")
-SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
-
-supabase: Client | None = None
-
-if SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY:
-    try:
-        supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
-        print("✅ Supabase connection established.")
-    except Exception as e:
-        print("⚠️ Supabase initialization failed:", e)
-else:
-    print("⚠️ Supabase environment variables missing! Visitor counter disabled.")
-
 
 # ================================================================
 # CORS SETTINGS
 # ================================================================
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],   # replace with production domain later
+    allow_origins=["*"],   # Change to production domains later
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -60,16 +35,13 @@ class AnalysisRequest(BaseModel):
     ids: List[str]
     category: str
 
-
 class AnalysisResponseItem(BaseModel):
     id: str
     overallScore: int
     dimensions: Dict[str, int]
 
-
 class AnalysisBatchResponse(BaseModel):
     analyses: List[AnalysisResponseItem]
-
 
 class NewsArticle(BaseModel):
     id: str
@@ -79,23 +51,25 @@ class NewsArticle(BaseModel):
     category: str
     timestamp: str
 
-
 # ================================================================
-# HEALTH CHECK
+# HEALTH CHECK ENDPOINT
 # ================================================================
 @app.get("/")
 def root():
+    """
+    Standard health-check endpoint used by Cloud Run.
+    Very lightweight and always succeeds.
+    """
     return {
         "message": "NOVARIC PARAGON Engine is Online",
         "profiles_loaded": len(load_profiles_data()),
         "data_source": (
-            "Supabase (Live)"
+            "Supabase (Live)" 
             if os.environ.get("USE_LIVE_DB") == "True"
             else "Local Mocks"
         ),
-        "visitor_counter": "Active" if supabase else "Inactive",
+        "visit_system": "Disabled",  # Visitor counter removed safely
     }
-
 
 # ================================================================
 # PROFILES ENDPOINTS
@@ -103,7 +77,6 @@ def root():
 @app.get("/api/profiles")
 def get_profiles():
     return load_profiles_data()
-
 
 @app.get("/api/profiles/{profile_id}")
 def get_profile(profile_id: str):
@@ -114,7 +87,6 @@ def get_profile(profile_id: str):
         raise HTTPException(status_code=404, detail="Profile not found")
 
     return profile
-
 
 # ================================================================
 # PROFILE ANALYSIS
@@ -153,7 +125,6 @@ def analyze_profiles(request: AnalysisRequest):
 
     return AnalysisBatchResponse(analyses=results)
 
-
 # ================================================================
 # INTERNATIONAL NEWS FEEDS
 # ================================================================
@@ -172,7 +143,6 @@ RSS_FEEDS = [
     "https://rss.dw.com/xml/rss-en-world",
     "https://news.google.com/rss/search?q=site:apnews.com",
 ]
-
 
 @app.get("/api/v1/news", response_model=List[NewsArticle])
 async def get_news():
@@ -205,6 +175,7 @@ async def get_news():
                         timestamp=entry.get("published", "Unknown"),
                     )
                 )
+
         except Exception as e:
             print(f"Feed error {url}: {e}")
             continue

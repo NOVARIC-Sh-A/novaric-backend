@@ -4,26 +4,26 @@ options:
   dynamicSubstitutions: true
 
 substitutions:
-  # Backend
+  # Backend service
   _SERVICE_NAME: "novaric-backend"
   _IMAGE_NAME: "novaric-backend"
 
-  # Frontend
+  # Frontend service
   _SERVICE_NAME_FE: "novaric-frontend"
   _IMAGE_NAME_FE: "novaric-frontend"
 
-  # Shared
+  # Shared config
   _REGION: "europe-west1"
   _AR_REPO: "cloud-run-source-deploy"
 
-  # Supabase (set real values in Cloud Build Trigger)
+  # Supabase secrets (Set REAL VALUES in Cloud Build Trigger)
   _SUPABASE_URL: "your-supabase-url"
-  _SUPABASE_SERVICE_ROLE_KEY: "your-supabase-service-role-key"
+  _SUPABASE_SERVICE_ROLE_KEY: "your-service-role-key"
 
 steps:
 
   # =====================================================
-  # 1. BUILD BACKEND (correct build context)
+  # 1. BUILD BACKEND
   # =====================================================
   - name: "gcr.io/cloud-builders/docker"
     id: "Build Backend"
@@ -45,7 +45,7 @@ steps:
       ]
 
   # =====================================================
-  # 2. DEPLOY BACKEND (with correct environment variables)
+  # 2. DEPLOY BACKEND
   # =====================================================
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
     id: "Deploy Backend"
@@ -64,12 +64,12 @@ steps:
       ]
 
   # =====================================================
-  # 3. BUILD FRONTEND (correct folder)
+  # 3. BUILD FRONTEND (React/Next UI)
   # =====================================================
   - name: "gcr.io/cloud-builders/docker"
     id: "Build Frontend"
     dir: "novaric-frontend"
-    waitFor: ["-"]
+    waitFor: ["-"]  # build in parallel
     args:
       [
         "build",

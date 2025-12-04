@@ -1,4 +1,3 @@
-# main.py
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -6,65 +5,70 @@ from typing import List, Dict, Any
 import feedparser
 import os
 
-# ### NEW ADDITION: Supabase Import (Replaces Redis) ###
+# Supabase client
 from supabase import create_client, Client
 
-# ================================================================
-# LIVE / MOCK DYNAMIC LOADING
-# ================================================================
+# Dynamic data loader
 from utils.data_loader import load_profiles_data
 
+
+# ================================================================
+# FASTAPI APP CONFIGURATION
+# ================================================================
 app = FastAPI(
     title="NOVARIC Backend",
     description="Clinical scoring API for NOVARIC® PARAGON System",
-    version="1.3.2", # Bumped version for Supabase Integration
+    version="1.3.3",
 )
 
-# -------------------------------------------------------------
-# ### NEW ADDITION: Supabase Connection Setup ###
-# -------------------------------------------------------------
-# Connects to your existing Supabase project.
-# Ensure these ENV variables are set in Cloud Run.
-SUPABASE_URL = os.environ.get("SUPABASE_URL")
-SUPABASE_KEY = os.environ.get("SUPABASE_KEY") # Use Service Role or Anon Key
 
-supabase: Client = None
+# ================================================================
+# SUPABASE INITIALIZATION
+# ================================================================
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY")  # Service Role Recommended
+
+supabase: Client | None = None
 
 if SUPABASE_URL and SUPABASE_KEY:
     try:
         supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-        print("✅ Connected to Supabase for Visitor Counting")
+        print("✅ Supabase connection established.")
     except Exception as e:
-        print(f"⚠️ Warning: Could not connect to Supabase: {e}")
+        print(f"⚠️ Failed to initialize Supabase: {e}")
 else:
-    print("⚠️ Warning: SUPABASE_URL or SUPABASE_KEY not set.")
+    print("⚠️ Supabase ENV variables missing.")
 
-# -------------------------------------------------------------
-# CORS
-# -------------------------------------------------------------
+
+# ================================================================
+# CORS SETTINGS
+# ================================================================
 app.add_middleware(
     CORSMiddleware,
-    # In production, replace "*" with your specific Frontend URL
-    allow_origins=["*"],   
+    allow_origins=["*"],   # Replace "*" with your production domain later
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# -------------------------------------------------------------
+
+# ================================================================
 # MODELS
-# -------------------------------------------------------------
+# ================================================================
 class AnalysisRequest(BaseModel):
     ids: List[str]
     category: str
+
 
 class AnalysisResponseItem(BaseModel):
     id: str
     overallScore: int
     dimensions: Dict[str, int]
 
+
 class AnalysisBatchResponse(BaseModel):
     analyses: List[AnalysisResponseItem]
+
 
 class NewsArticle(BaseModel):
     id: str
@@ -74,106 +78,91 @@ class NewsArticle(BaseModel):
     category: str
     timestamp: str
 
-# -------------------------------------------------------------
-# ROOT HEALTH CHECK
-# -------------------------------------------------------------
+
+# ================================================================
+# HEALTH CHECK
+# ================================================================
 @app.get("/")
 def root():
-    data_source = (
-        "Supabase (Live)" 
-        if os.environ.get("USE_LIVE_DB") == "True" 
-        else "Local Mocks"
-    )
-    
-    profiles = load_profiles_data()
     return {
         "message": "NOVARIC PARAGON Engine is Online",
-        "profiles_loaded": len(profiles),
-        "data_source": data_source,
-        "visitor_counter_status": "Active" if supabase else "Inactive"
+        "profiles_loaded": len(load_profiles_data()),
+        "data_source": "Supabase (Live)" if os.environ.get("USE_LIVE_DB") == "True" else "Local Mocks",
+        "visitor_counter": "Active" if supabase else "Inactive",
     }
 
-# -------------------------------------------------------------
-# ### NEW ADDITION: Visitor Counter Endpoint (Supabase RPC) ###
-# -------------------------------------------------------------
+
+# ================================================================
+# VISITOR COUNTER (Supabase RPC)
+# ================================================================
 @app.get("/api/visit")
 def track_visit(request: Request):
     """
-    Increments visitor count atomically using Supabase RPC.
-    This removes the need for Redis.
+    Atomically increments global visit count using Supabase RPC:
+        increment_visit()
     """
+
     if not supabase:
-        return {"count": 0, "error": "Database unavailable"}
+        return {"count": None, "error": "Supabase unavailable"}
 
     try:
-        # Call the Stored Procedure 'increment_visitor' on Supabase
-        # This function handles the +1 math safely inside the database
-        response = supabase.rpc('increment_visitor', {}).execute()
-        
-        # supabase-py returns the result in response.data
-        new_count = response.data 
-        
-        return {"count": new_count if new_count is not None else 0}
-            
-    except Exception as e:
-        print(f"Visitor Error: {e}")
-        # Fail gracefully so the website doesn't crash
-        return {"count": 0}
+        result = supabase.rpc("increment_visit", {}).execute()
 
-# -------------------------------------------------------------
-# PROFILES ENDPOINTS (LIVE per request)
-# -------------------------------------------------------------
+        if result.error:
+            raise Exception(result.error.message)
+
+        return {"count": result.data}
+
+    except Exception as e:
+        print(f"Visitor Counter Error: {e}")
+        return {"count": None}
+
+
+# ================================================================
+# PROFILES ENDPOINTS
+# ================================================================
 @app.get("/api/profiles")
 def get_profiles():
-    """Always fetches LIVE data on each request."""
-    profiles = load_profiles_data()
-    return profiles
+    return load_profiles_data()
+
 
 @app.get("/api/profiles/{profile_id}")
 def get_profile(profile_id: str):
-    """Fetch one profile dynamically."""
     profiles = load_profiles_data()
-    for p in profiles:
-        if str(p["id"]) == profile_id:
-            return p
-    raise HTTPException(status_code=404, detail="Profile not found")
+    profile = next((p for p in profiles if str(p["id"]) == profile_id), None)
 
-# -------------------------------------------------------------
-# DYNAMIC ANALYSIS ENDPOINT
-# -------------------------------------------------------------
+    if not profile:
+        raise HTTPException(status_code=404, detail="Profile not found")
+
+    return profile
+
+
+# ================================================================
+# PROFILE ANALYSIS
+# ================================================================
 @app.post("/api/profiles/analysis-batch", response_model=AnalysisBatchResponse)
 def analyze_profiles(request: AnalysisRequest):
     profiles = load_profiles_data()
     results = []
 
     for profile_id in request.ids:
-        profile = next(
-            (p for p in profiles if str(p["id"]) == profile_id),
-            None
-        )
-
+        profile = next((p for p in profiles if str(p["id"]) == profile_id), None)
         if not profile:
             continue
 
-        dimensions_map = {}
-        total_score = 0
-        count = 0
-
         analysis = (
-            profile.get("maragonAnalysis") 
-            or profile.get("paragonAnalysis") 
+            profile.get("maragonAnalysis")
+            or profile.get("paragonAnalysis")
             or []
         )
 
-        for item in analysis:
-            dim_name = item.get("dimension")
-            score = item.get("score", 0)
-            if dim_name and score is not None:
-                dimensions_map[dim_name] = score
-                total_score += score
-                count += 1
+        dimensions_map = {
+            item["dimension"]: item.get("score", 0)
+            for item in analysis if item.get("dimension")
+        }
 
-        overall = int(total_score / count) if count > 0 else 0
+        score_values = list(dimensions_map.values())
+        overall = int(sum(score_values) / len(score_values)) if score_values else 0
 
         results.append(
             AnalysisResponseItem(
@@ -185,9 +174,10 @@ def analyze_profiles(request: AnalysisRequest):
 
     return AnalysisBatchResponse(analyses=results)
 
-# -------------------------------------------------------------
-# INTERNATIONAL NEWS ENDPOINT
-# -------------------------------------------------------------
+
+# ================================================================
+# INTERNATIONAL NEWS FEEDS
+# ================================================================
 RSS_FEEDS = [
     "https://rss.cnn.com/rss/edition.rss",
     "https://feeds.bbci.co.uk/news/rss.xml",
@@ -204,10 +194,11 @@ RSS_FEEDS = [
     "https://news.google.com/rss/search?q=site:apnews.com",
 ]
 
+
 @app.get("/api/v1/news", response_model=List[NewsArticle])
 async def get_news():
     articles = []
-    
+
     for url in RSS_FEEDS:
         try:
             feed = feedparser.parse(url)
@@ -215,14 +206,15 @@ async def get_news():
                 continue
 
             for entry in feed.entries[:5]:
+                article_id = entry.get("id") or entry.get("link")
+                if not article_id:
+                    continue
+
                 image_url = (
                     entry.media_content[0].get("url", "")
                     if "media_content" in entry and entry.media_content
                     else ""
                 )
-                article_id = entry.get("id") or entry.get("link")
-                if not article_id:
-                    continue
 
                 articles.append(
                     NewsArticle(
@@ -235,7 +227,7 @@ async def get_news():
                     )
                 )
         except Exception as e:
-            print(f"Error parsing feed {url}: {e}")
+            print(f"Feed error {url}: {e}")
             continue
 
     return articles

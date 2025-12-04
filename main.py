@@ -29,13 +29,13 @@ app = FastAPI(
 # SUPABASE INITIALIZATION (FIXED)
 # ================================================================
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
-SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")  # MUST MATCH Cloud Run
+SSUPABASE_SERVICE_ROLE_KEY = os.environ.get("SSUPABASE_SERVICE_ROLE_KEY")  # MUST MATCH Cloud Run
 
 supabase: Client | None = None
 
-if SUPABASE_URL and SUPABASE_SERVICE_KEY:
+if SUPABASE_URL and SSUPABASE_SERVICE_ROLE_KEY:
     try:
-        supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+        supabase = create_client(SUPABASE_URL, SSUPABASE_SERVICE_ROLE_KEY)
         print("✅ Supabase connection established.")
     except Exception as e:
         print(f"⚠️ Failed to initialize Supabase: {e}")

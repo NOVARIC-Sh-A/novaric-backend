@@ -9,7 +9,7 @@ from .bio_scraper import scrape_profile_data
 
 # OPTIONAL: Supabase support for loading into DB
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
-SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
+SSUPABASE_SERVICE_ROLE_KEY = os.environ.get("SSUPABASE_SERVICE_ROLE_KEY")
 
 _supabase_client = None
 
@@ -23,14 +23,14 @@ def get_supabase_client():
     if _supabase_client is not None:
         return _supabase_client
 
-    if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
+    if not SUPABASE_URL or not SSUPABASE_SERVICE_ROLE_KEY:
         print("ℹ️ Supabase not configured – skipping DB load step.")
         _supabase_client = None
         return None
 
     try:
         from supabase import create_client, Client  # type: ignore
-        _supabase_client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+        _supabase_client = create_client(SUPABASE_URL, SSUPABASE_SERVICE_ROLE_KEY)
         print("✅ Supabase client initialised.")
         return _supabase_client
     except Exception as e:

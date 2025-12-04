@@ -6,12 +6,12 @@ router = APIRouter()
 
 # Safely load env variables
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
-SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
+SSUPABASE_SERVICE_ROLE_KEY = os.environ.get("SSUPABASE_SERVICE_ROLE_KEY")
 
-if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
+if not SUPABASE_URL or not SSUPABASE_SERVICE_ROLE_KEY:
     raise Exception("Supabase environment variables are not set")
 
-supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+supabase = create_client(SUPABASE_URL, SSUPABASE_SERVICE_ROLE_KEY)
 
 
 @router.get("/visit")

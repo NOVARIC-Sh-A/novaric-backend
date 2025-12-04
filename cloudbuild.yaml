@@ -18,7 +18,7 @@ substitutions:
 
   # Supabase Secrets (IMPORTANT: Set real values in Cloud Build Trigger)
   _SUPABASE_URL: "your-supabase-url-here"
-  _SUPABASE_SERVICE_KEY: "your-supabase-service-key-here"
+  _SSUPABASE_SERVICE_ROLE_KEY: "your-supabase-service-key-here"
 
 steps:
 
@@ -60,7 +60,7 @@ steps:
         "--port=8080",
         "--memory=512Mi",
         "--cpu=1",
-        "--set-env-vars=SUPABASE_URL=${_SUPABASE_URL},SUPABASE_SERVICE_KEY=${_SUPABASE_SERVICE_KEY},USE_LIVE_DB=True"
+        "--set-env-vars=SUPABASE_URL=${_SUPABASE_URL},SSUPABASE_SERVICE_ROLE_KEY=${_SSUPABASE_SERVICE_ROLE_KEY},USE_LIVE_DB=True"
       ]
 
   # ==========================================

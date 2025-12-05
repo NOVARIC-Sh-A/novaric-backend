@@ -1,7 +1,36 @@
 # etl/politician_map.py
+import unicodedata
 
 # ------------------------------------------------------------
-# 1) OFFICIAL STATIC ID MAP (your existing list — unchanged)
+# Albanian-safe name normalization
+# ------------------------------------------------------------
+def normalize_name(name: str) -> str:
+    if not name:
+        return ""
+
+    # Normalize Unicode (handles ç, ë, accents, combining chars)
+    name = unicodedata.normalize("NFKC", name)
+
+    # Replace non-breaking spaces
+    name = name.replace("\u00A0", " ")
+
+    # Lowercase
+    name = name.lower().strip()
+
+    # Normalize combining characters for ç
+    name = name.replace("ç", "ç")  # c + combining cedilla → ç
+    name = name.replace("Ç", "ç")
+    name = name.replace("C̨", "ç")
+
+    # Normalize combining characters for ë
+    name = name.replace("ë", "ë")
+    name = name.replace("Ë", "ë")
+
+    return name
+
+
+# ------------------------------------------------------------
+# 1) OFFICIAL STATIC ID MAP
 # ------------------------------------------------------------
 POLITICIAN_ID_MAP = {
     "Edi Rama": 1,
@@ -108,19 +137,29 @@ POLITICIAN_ID_MAP = {
 
 
 # ------------------------------------------------------------
-# 2) AUTO-GENERATED METADATA MAP (SAFE, CLEAN)
+# 2) RICH METADATA MAP (future-proof for PARAGON)
 # ------------------------------------------------------------
-# This prevents ImportError and prepares future Trend Engine compatibility.
-# It does NOT require modifying any other file.
-# ------------------------------------------------------------
-
 POLITICIAN_META = {
     name: {
         "id": pid,
         "full_name": name,
-        "photo_url": None,     # Can be filled later
-        "party": None,         # Optional metadata (safe defaults)
-        "region": None,        # Optional metadata
+        "photo_url": None,
+        "party": None,
+        "region": None,
     }
+    for name, pid in POLITICIAN_ID_MAP.items()
+}
+
+
+# ------------------------------------------------------------
+# 3) NORMALIZED METADATA MAP
+# ------------------------------------------------------------
+POLITICIAN_META_NORMALIZED = {
+    normalize_name(name): meta
+    for name, meta in POLITICIAN_META.items()
+}
+
+POLITICIAN_ID_MAP_NORMALIZED = {
+    normalize_name(name): pid
     for name, pid in POLITICIAN_ID_MAP.items()
 }

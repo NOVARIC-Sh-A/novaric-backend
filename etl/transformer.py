@@ -1,90 +1,111 @@
 # etl/transformer.py
-import re
-import unicodedata
+"""
+Transforms scraped media articles into aggregated politician-level signals.
+Version 3: Uses real politician_id mapping + fuzzy Albanian name matching.
+"""
+
 from typing import List, Dict, Any
+import re
+from etl.politician_map import POLITICIAN_ID_MAP
 
-POLITICIANS = [
-    "Edi Rama",
-    "Sali Berisha",
-    "Ilir Meta",
-    "Lulzim Basha",
-    "Monika Kryemadhi",
-    "Erion Veliaj",
-    "Belind Këlliçi",
-    "Bajram Begaj",
-    "Benet Beci",
-    "Nard Ndoka",
-]
 
-# Precompute normalized names for matching
-def normalize(text: str) -> str:
-    text = unicodedata.normalize("NFD", text)
-    text = text.encode("ascii", "ignore").decode("utf-8")
-    return text.lower()
-
-NORMALIZED_MAP = {
-    p: {
-        "full": normalize(p),
-        "first": normalize(p.split()[0]),
-        "last": normalize(p.split()[-1]),
-    }
-    for p in POLITICIANS
+# ------------------------------------------------------
+# Build name → ID + keyword maps
+# ------------------------------------------------------
+POLITICIANS = {
+    name: {"id": POLITICIAN_ID_MAP[name], "name": name}
+    for name in POLITICIAN_ID_MAP
 }
 
+KEYWORD_MAP = {}
 
-def match_politician(text: str) -> str | None:
+for full_name in POLITICIANS:
+    parts = full_name.split()
+    first = parts[0]
+    last = parts[-1]
+
+    KEYWORD_MAP[full_name] = {
+        "full": full_name.lower(),
+        "first": first.lower(),
+        "last": last.lower(),
+    }
+
+
+# ------------------------------------------------------
+# Helper: check if article mentions a given politician
+# ------------------------------------------------------
+def _article_mentions(article_text: str, keymap: Dict[str, str]) -> bool:
+    text = article_text.lower()
+
+    # FULL name match
+    if keymap["full"] in text:
+        return True
+
+    # Last name (primary disambiguator)
+    if re.search(rf"\b{re.escape(keymap['last'])}\b", text):
+        return True
+
+    # First name match (skip very common Albanian names)
+    if keymap["first"] not in ["edi", "ilir", "monika", "bajram", "ardit"]:
+        if re.search(rf"\b{re.escape(keymap['first'])}\b", text):
+            return True
+
+    return False
+
+
+# ------------------------------------------------------
+# MAIN: Build politician-level signals
+# ------------------------------------------------------
+def build_signals(articles: List[Dict[str, Any]]) -> Dict[int, Dict[str, Any]]:
     """
-    Attempt to match article text against politician names:
-    - Full name match
-    - First name match
-    - Last name match
-    - Case & diacritic insensitive
+    Input: raw scraped articles
+    Output: signals per politician_id
     """
-    norm = normalize(text)
 
-    for p, parts in NORMALIZED_MAP.items():
-        if parts["full"] in norm:
-            return p
-        if parts["first"] in norm:
-            return p
-        if parts["last"] in norm:
-            return p
+    # Initialize empty signals for each politician
+    signals = {
+        POLITICIANS[name]["id"]: {
+            "politician_id": POLITICIANS[name]["id"],
+            "name": name,
+            "mentions": 0,
+            "positive": 0,
+            "negative": 0,
+            "neutral": 0,
+            "media_hits": [],
+        }
+        for name in POLITICIANS
+    }
 
-    return None
+    for article in articles:
+        title = article.get("title", "")
+        text = article.get("content", "")
 
+        combined = f"{title} {text}".strip().lower()
 
-def build_signals(articles: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
-    """
-    Convert raw scraped articles into PARAGON input signals.
-    """
-    signals = {}
+        # Basic sentiment heuristic (to be replaced by ML)
+        sentiment = "neutral"
+        if any(w in combined for w in ["kritik", "akuz", "skandal", "përplasje", "sulmo"]):
+            sentiment = "negative"
+        elif any(w in combined for w in ["lavd", "mbështet", "pozitiv", "arritje"]):
+            sentiment = "positive"
 
-    for item in articles:
-        title = item.get("title", "")
-        matched = match_politician(title)
+        # Try matching each politician by fuzzy name rules
+        for full_name, keymap in KEYWORD_MAP.items():
+            if _article_mentions(combined, keymap):
 
-        if not matched:
-            continue
+                pid = POLITICIANS[full_name]["id"]
 
-        if matched not in signals:
-            signals[matched] = {
-                "mentions": 0,
-                "positive": 0,
-                "negative": 0,
-                "neutral": 0,
-                "media_hits": [],
-            }
+                signals[pid]["mentions"] += 1
+                signals[pid]["media_hits"].append(article)
 
-        signals[matched]["mentions"] += 1
-        signals[matched]["media_hits"].append(item)
+                if sentiment == "positive":
+                    signals[pid]["positive"] += 1
+                elif sentiment == "negative":
+                    signals[pid]["negative"] += 1
+                else:
+                    signals[pid]["neutral"] += 1
 
-        # VERY simple sentiment placeholder
-        t = title.lower()
-        if any(w in t for w in ["kritikon", "akuza", "skandal", "debate"]):
-            signals[matched]["negative"] += 1
-        elif any(w in t for w in ["lavdëron", "mbështet", "fitore"]):
-            signals[matched]["positive"] += 1
-        else:
-            signals[matched]["neutral"] += 1
+    # Return only politicians who were actually found in articles
+    filtered = {pid: v for pid, v in signals.items() if v["mentions"] > 0}
 
-    return signals
+    return filtered

@@ -34,7 +34,6 @@ HEADERS = {
     "Content-Type": "application/json",
 }
 
-
 # ----------------------------------------------------
 # INTERNAL GET helper
 # ----------------------------------------------------
@@ -46,12 +45,9 @@ def _get(path: str, params: Dict[str, Any]) -> List[Dict[str, Any]]:
         raise Exception("❌ Unauthorized: Invalid Supabase API key")
 
     if resp.status_code >= 400:
-        raise Exception(
-            f"❌ Supabase GET error {resp.status_code}: {resp.text}"
-        )
+        raise Exception(f"❌ Supabase GET error {resp.status_code}: {resp.text}")
 
     return resp.json()
-
 
 # ----------------------------------------------------
 # UPSERT helper (INSERT OR UPDATE)
@@ -62,10 +58,10 @@ def supabase_upsert(
     conflict_col: str
 ):
     """
-    Performs UPSERT (insert or update) on any table using Supabase REST.
+    Performs UPSERT (insert or update) on any table via Supabase REST.
 
     Example:
-        supabase_upsert("paragon_scores", data, "profile_id")
+        supabase_upsert("paragon_scores", records, "politician_id")
     """
 
     if not isinstance(records, list) or len(records) == 0:
@@ -86,39 +82,54 @@ def supabase_upsert(
         raise Exception("❌ Unauthorized: SERVICE_ROLE_KEY invalid or missing")
 
     if resp.status_code >= 400:
-        raise Exception(
-            f"❌ Supabase UPSERT failed [{resp.status_code}]: {resp.text}"
-        )
+        raise Exception(f"❌ Supabase UPSERT failed [{resp.status_code}]: {resp.text}")
 
-    # Some POST calls return no JSON
     try:
         return resp.json()
     except Exception:
         return {"status": "ok"}
 
+# ----------------------------------------------------
+# INSERT helper (used by Trend Engine)
+# ----------------------------------------------------
+def supabase_insert(table: str, records: List[Dict[str, Any]]):
+    """
+    Used for inserting history rows (e.g., paragon_trends).
+    No upsert, no conflict handling.
+    """
+
+    if not isinstance(records, list) or len(records) == 0:
+        raise Exception("❌ supabase_insert: 'records' must be a non-empty list")
+
+    url = f"{REST_URL}/{table}"
+
+    resp = requests.post(
+        url,
+        headers=HEADERS,
+        json=records,
+        timeout=20
+    )
+
+    if resp.status_code == 401:
+        raise Exception("❌ Unauthorized: SERVICE_ROLE_KEY invalid or missing")
+
+    if resp.status_code >= 400:
+        raise Exception(f"❌ Supabase INSERT failed [{resp.status_code}]: {resp.text}")
+
+    try:
+        return resp.json()
+    except Exception:
+        return {"status": "ok"}
 
 # ----------------------------------------------------
 # Fetch PARAGON + joined politician data
 # ----------------------------------------------------
 def fetch_live_paragon_data() -> List[Dict[str, Any]]:
-    """
-    Returns:
-      [
-        {
-          "profile_id": 1,
-          "overall_score": 78,
-          "dimension_scores": {...},
-          "politicians": {...}
-        },
-        ...
-      ]
-    """
     params = {
         "select": "*,politicians(*)",
         "order": "overall_score.desc"
     }
     return _get("paragon_scores", params)
-
 
 # ----------------------------------------------------
 # Generic table fetcher

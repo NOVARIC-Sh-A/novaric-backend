@@ -6,56 +6,85 @@ from typing import List, Dict, Any
 from etl.crawlers.media_crawler import MediaCrawler
 from etl.transformer import build_signals
 from etl.scoring_engine import build_paragon_scores_from_signals
-from utils.supabase_client import supabase_upsert, supabase_insert
+from utils.supabase_client import (
+    supabase_upsert,
+    supabase_insert,
+    fetch_table
+)
 
 
-# ------------------------------------------------------------
-# Trend writing helper (writes history snapshots)
-# ------------------------------------------------------------
+# ============================================================
+# TREND ENGINE — Writes historical score snapshots
+# Matches your real Supabase schema:
+#
+#   id BIGSERIAL PK
+#   politician_id INTEGER FK
+#   previous_score INTEGER
+#   new_score INTEGER
+#   delta INTEGER
+#   calculated_at timestamptz
+#   raw_snapshot jsonb
+# ============================================================
 def write_trend_history(paragon_records: List[Dict[str, Any]]) -> None:
-    """
-    Saves a historical record of each politician's score.
-    Table: paragon_trends
-    Columns (recommended schema):
-        id              BIGSERIAL PRIMARY KEY
-        politician_id   INTEGER  REFERENCES politicians(id)
-        overall_score   INTEGER
-        sentiment       INTEGER
-        mentions        INTEGER
-        calculated_at   TIMESTAMPTZ DEFAULT now()
-    """
 
-    history_rows: List[Dict[str, Any]] = []
+    if not paragon_records:
+        print("[Trend] No records to log.")
+        return
+
+    # --------------------------------------------------------
+    # 1) Fetch PREVIOUS paragon_scores from Supabase
+    # --------------------------------------------------------
+    try:
+        previous_rows = fetch_table(
+            "paragon_scores",
+            select="politician_id, overall_score"
+        )
+        previous_map = {
+            row["politician_id"]: row["overall_score"]
+            for row in previous_rows
+        }
+    except Exception as e:
+        print("⚠ Could not fetch previous scores:", e)
+        previous_map = {}
+
+    # --------------------------------------------------------
+    # 2) Build history entries
+    # --------------------------------------------------------
+    history_rows = []
 
     for r in paragon_records:
+        pid = r["politician_id"]
+        new_score = r["overall_score"]
+        previous_score = previous_map.get(pid)
+
+        delta = None
+        if previous_score is not None:
+            delta = new_score - previous_score
+
         history_rows.append(
             {
-                "politician_id": r["politician_id"],
-                "overall_score": r["overall_score"],
-                "sentiment": r["dimension_scores"]["Perceptimi Publik"]["score"],
-                "mentions": r["signals_raw"]["mentions"],
+                "politician_id": pid,
+                "previous_score": previous_score,
+                "new_score": new_score,
+                "delta": delta,
+                "raw_snapshot": r,     # full JSON snapshot
                 "calculated_at": "now()",
             }
         )
 
-    if not history_rows:
-        print("[Trend] No trend rows to write.")
-        return
-
+    # --------------------------------------------------------
+    # 3) INSERT — always add new rows (no upsert)
+    # --------------------------------------------------------
     try:
-        # For trends we always want NEW rows (no upsert / overwrite)
-        supabase_insert(
-            table="paragon_trends",
-            records=history_rows,
-        )
-        print(f"[Trend] Wrote {len(history_rows)} trend history entries.")
+        supabase_insert("paragon_trends", history_rows)
+        print(f"[Trend] Inserted {len(history_rows)} trend rows.")
     except Exception as e:
-        print("❌ Trend history write failed:", e)
+        print("❌ Trend insert failed:", e)
 
 
-# ------------------------------------------------------------
-# MAIN ETL PROCESS
-# ------------------------------------------------------------
+# ============================================================
+# MAIN ETL PIPELINE
+# ============================================================
 async def run_etl() -> None:
     print("============== NOVARIC® PARAGON ETL ==============")
 
@@ -72,7 +101,7 @@ async def run_etl() -> None:
         return
 
     # ----------------------------------------------------
-    # 2) BUILD NORMALIZED SIGNALS (names → normalized keys)
+    # 2) BUILD NORMALIZED SIGNALS
     # ----------------------------------------------------
     signals = build_signals(scraped_items)
     print(f"[ETL] Matched signals for {len(signals)} politicians")
@@ -83,43 +112,43 @@ async def run_etl() -> None:
         return
 
     # ----------------------------------------------------
-    # 3) SCORING ENGINE (PARAGON normalization)
+    # 3) SCORING ENGINE
     # ----------------------------------------------------
-    db_records = build_paragon_scores_from_signals(signals)
+    paragon_records = build_paragon_scores_from_signals(signals)
 
-    if not db_records:
+    if not paragon_records:
         print("[ETL] No DB records built – aborting.")
         print("============== ETL FINISHED ==============")
         return
 
     # ----------------------------------------------------
-    # 4) UPSERT live scores → Supabase
+    # 4) UPSERT LIVE SCORES
     # ----------------------------------------------------
     print("[ETL] Uploading normalized PARAGON scores to Supabase…")
 
     try:
         supabase_upsert(
             table="paragon_scores",
-            records=db_records,           # ✅ correct param name
-            conflict_col="politician_id"  # ✅ unique identifier in table
+            records=paragon_records,
+            conflict_col="politician_id"
         )
-        print(f"✅ ETL SUCCESS – upserted {len(db_records)} live score records.")
+        print(f"✅ ETL SUCCESS – upserted {len(paragon_records)} live score records.")
     except Exception as e:
-        print("❌ ETL FAILED during Supabase upsert:", str(e))
+        print("❌ ETL FAILED during Supabase upsert:", e)
         print("============== ETL FINISHED ==============")
         return
 
     # ----------------------------------------------------
-    # 5) TREND ENGINE — Append history snapshot
+    # 5) TREND ENGINE
     # ----------------------------------------------------
     print("[ETL] Writing trend history snapshot…")
-    write_trend_history(db_records)
+    write_trend_history(paragon_records)
 
     print("============== ETL FINISHED ==============")
 
 
 # ------------------------------------------------------------
-# Entry point
+# Entry
 # ------------------------------------------------------------
 if __name__ == "__main__":
     asyncio.run(run_etl())

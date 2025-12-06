@@ -146,7 +146,6 @@ def build_paragon_scores_from_signals(
         results.append(
             {
                 "politician_id": politician_id,     # correct primary key
-                "politician_name": full_name,       # human-readable
                 "overall_score": overall,
                 "dimension_scores": dimension_scores,
                 "signals_raw": sig,                 # optional — keeps full trace

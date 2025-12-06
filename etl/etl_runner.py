@@ -6,7 +6,7 @@ from typing import List, Dict, Any
 from etl.crawlers.media_crawler import MediaCrawler
 from etl.transformer import build_signals
 from etl.scoring_engine import build_paragon_scores_from_signals
-from utils.supabase_client import supabase_upsert
+from utils.supabase_client import supabase_upsert, supabase_insert
 
 
 # ------------------------------------------------------------
@@ -16,15 +16,16 @@ def write_trend_history(paragon_records: List[Dict[str, Any]]) -> None:
     """
     Saves a historical record of each politician's score.
     Table: paragon_trends
-    Columns:
-        politician_id
-        score
-        sentiment
-        mentions
-        calculated_at (timestamp)
+    Columns (recommended schema):
+        id              BIGSERIAL PRIMARY KEY
+        politician_id   INTEGER  REFERENCES politicians(id)
+        overall_score   INTEGER
+        sentiment       INTEGER
+        mentions        INTEGER
+        calculated_at   TIMESTAMPTZ DEFAULT now()
     """
 
-    history_rows = []
+    history_rows: List[Dict[str, Any]] = []
 
     for r in paragon_records:
         history_rows.append(
@@ -42,10 +43,10 @@ def write_trend_history(paragon_records: List[Dict[str, Any]]) -> None:
         return
 
     try:
-        supabase_upsert(
+        # For trends we always want NEW rows (no upsert / overwrite)
+        supabase_insert(
             table="paragon_trends",
             records=history_rows,
-            conflict_col="id"  # new row each time — no conflict overwrite
         )
         print(f"[Trend] Wrote {len(history_rows)} trend history entries.")
     except Exception as e:
@@ -99,8 +100,8 @@ async def run_etl() -> None:
     try:
         supabase_upsert(
             table="paragon_scores",
-            records=db_records,           # correct param name
-            conflict_col="politician_id"  # unique identifier
+            records=db_records,           # ✅ correct param name
+            conflict_col="politician_id"  # ✅ unique identifier in table
         )
         print(f"✅ ETL SUCCESS – upserted {len(db_records)} live score records.")
     except Exception as e:

@@ -9,19 +9,22 @@ substitutions:
   _AR_REPO: "cloud-run-source-deploy"
   _IMAGE_NAME: "novaric-backend"
 
-  # Provided via UI in Cloud Build Trigger
+  # Provided via Cloud Build UI (do NOT hardcode)
   _SUPABASE_URL: "your-supabase-url"
   _SUPABASE_SERVICE_ROLE_KEY: "your-service-role-key"
 
 steps:
 
-  # ---------------------------------------
-  # 1) Build Docker image
-  # ---------------------------------------
+  # ============================
+  # Build Docker Image
+  # ============================
   - name: "gcr.io/cloud-builders/docker"
+    id: "Build"
     args:
       [
         "build",
+        "--cache-from",
+        "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_IMAGE_NAME}:latest",
         "-t",
         "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_IMAGE_NAME}:$SHORT_SHA",
         "-t",
@@ -29,31 +32,23 @@ steps:
         "."
       ]
 
-  # ---------------------------------------
-  # 2) Push image (SHA)
-  # ---------------------------------------
+  # ============================
+  # Push image
+  # ============================
   - name: "gcr.io/cloud-builders/docker"
-    args:
-      [
-        "push",
-        "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_IMAGE_NAME}:$SHORT_SHA"
-      ]
+    id: "Push SHA"
+    args: ["push", "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_IMAGE_NAME}:$SHORT_SHA"]
 
-  # ---------------------------------------
-  # 3) Push latest tag
-  # ---------------------------------------
   - name: "gcr.io/cloud-builders/docker"
-    args:
-      [
-        "push",
-        "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_IMAGE_NAME}:latest"
-      ]
+    id: "Push latest"
+    args: ["push", "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_IMAGE_NAME}:latest"]
 
-  # ---------------------------------------
-  # 4) Deploy to Cloud Run
-  # ---------------------------------------
+  # ============================
+  # Deploy to Cloud Run
+  # ============================
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
-    entrypoint: "gcloud"
+    id: "Deploy"
+    entrypoint: gcloud
     args:
       [
         "run", "deploy", "${_SERVICE_NAME}",
@@ -61,13 +56,11 @@ steps:
         "--region=${_REGION}",
         "--platform=managed",
         "--allow-unauthenticated",
-
         "--port=8080",
         "--cpu=1",
         "--memory=512Mi",
         "--timeout=300",
         "--max-instances=20",
-
         "--set-env-vars",
         "SUPABASE_URL=${_SUPABASE_URL},SUPABASE_SERVICE_ROLE_KEY=${_SUPABASE_SERVICE_ROLE_KEY},USE_LIVE_DB=True"
       ]

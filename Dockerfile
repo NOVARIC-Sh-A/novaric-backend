@@ -1,21 +1,44 @@
-# Use a lightweight and stable Python runtime
-FROM python:3.10-slim
+# ============================
+# 1) Base builder image
+# ============================
+FROM python:3.11-slim AS builder
 
-# Set application working directory
 WORKDIR /app
 
-# Copy requirements first for Docker caching
-COPY requirements.txt /app/requirements.txt
+# Install build dependencies (then removed in final stage)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
 
-# Install dependencies
-RUN pip install --no-cache-dir -r /app/requirements.txt
+COPY novaric-backend/requirements.txt .
 
-# Copy the entire backend source code
-COPY . /app/
+RUN pip install --user --no-cache-dir -r requirements.txt
 
-# Cloud Run exposes port 8080
+
+# ============================
+# 2) Final runtime image
+# ============================
+FROM python:3.11-slim
+
+ENV PYTHONUNBUFFERED=1
 ENV PORT=8080
+
+# Add non-root user
+RUN useradd -m appuser
+USER appuser
+
+WORKDIR /app
+
+# Copy installed dependencies
+COPY --from=builder /root/.local /home/appuser/.local
+
+# Export PATH for local installs
+ENV PATH=/home/appuser/.local/bin:$PATH
+
+# Copy backend code
+COPY novaric-backend/ /app/
+
 EXPOSE 8080
 
-# Start FastAPI using uvicorn (Cloud Run compliant)
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]

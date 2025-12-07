@@ -78,7 +78,7 @@ def get_latest_score_for(politician_id: int):
         "paragon_scores",
         {
             "select": "*,politicians(*)",
-            "eq": f"politician_id.{politician_id}",
+            "politician_id": f"eq.{politician_id}",
             "limit": 1
         }
     )
@@ -110,7 +110,7 @@ def get_trend_history(politician_id: int):
         "paragon_trends",
         {
             "select": "*,politicians(*)",
-            "eq": f"politician_id.{politician_id}",
+            "politician_id": f"eq.{politician_id}",
             "order": "calculated_at.desc",
             "limit": 50
         }
@@ -171,7 +171,7 @@ def get_momentum(politician_id: int):
         "paragon_trends",
         {
             "select": "*,politicians(*)",
-            "eq": f"politician_id.{politician_id}",
+            "politician_id": f"eq.{politician_id}",
             "order": "calculated_at.desc",
             "limit": 2
         }

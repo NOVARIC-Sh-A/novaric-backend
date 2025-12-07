@@ -75,7 +75,7 @@ class NewsArticle(BaseModel):
 
 
 # ================================================================
-# HEALTH CHECKS (Cloud Run Probes)
+# HEALTH CHECKS
 # ================================================================
 @app.get("/")
 def root():
@@ -100,12 +100,12 @@ def root():
 
 @app.get("/healthz")
 def health_probe():
-    """Cloud Run uses this endpoint to ensure container is alive."""
+    """Used by Cloud Run to confirm the service is alive."""
     return {"status": "healthy"}
 
 
 # ================================================================
-# PROFILE ENDPOINTS
+# PROFILES ENDPOINTS
 # ================================================================
 @app.get("/api/profiles")
 def get_profiles():
@@ -128,7 +128,7 @@ def get_profile(profile_id: str):
 
 
 # ================================================================
-# PROFILE ANALYSIS BATCH ENDPOINT
+# PROFILE ANALYSIS ENDPOINT
 # ================================================================
 @app.post("/api/profiles/analysis-batch", response_model=AnalysisBatchResponse)
 def analyze_profiles(request: AnalysisRequest):
@@ -229,16 +229,13 @@ app.include_router(paragon_router)
 
 
 # ================================================================
-# STARTUP LOG
+# STARTUP & SHUTDOWN EVENTS
 # ================================================================
 @app.on_event("startup")
 def startup_event():
     logger.info("NOVARIC Backend has started successfully.")
 
 
-# ================================================================
-# SHUTDOWN LOG
-# ================================================================
 @app.on_event("shutdown")
 def shutdown_event():
     logger.info("NOVARIC Backend shutting down gracefully.")

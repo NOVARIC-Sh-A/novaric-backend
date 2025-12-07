@@ -1,20 +1,33 @@
 # paragon_api.py
 from fastapi import APIRouter
-from utils.supabase_client import fetch_table, _get
 from typing import List, Dict, Any
+from utils.supabase_client import _get
 
-router = APIRouter(prefix="/api/paragon", tags=["PARAGON Analytics"])
+router = APIRouter(
+    prefix="/api/paragon",
+    tags=["PARAGON Analytics"]
+)
+
+# -------------------------------------------------------------------
+# Helper: Fetch table with safety wrapper
+# -------------------------------------------------------------------
+def fetch_safe(table: str, params: Dict[str, Any]) -> List[Dict[str, Any]]:
+    try:
+        return _get(table, params)
+    except Exception as e:
+        print(f"[PARAGON API] Supabase fetch failed for {table}: {e}")
+        return []
 
 
-# ------------------------------------------------------------
-# 1) LATEST LIVE SCORES (from paragon_scores)
-# ------------------------------------------------------------
+# -------------------------------------------------------------------
+# 1) LATEST LIVE SCORES (paragon_scores)
+# -------------------------------------------------------------------
 @router.get("/latest")
 def get_latest_scores():
     """
-    Returns live PARAGON scores sorted by overall score DESC.
+    Returns live PARAGON scores sorted by overall score.
     """
-    data = _get(
+    data = fetch_safe(
         "paragon_scores",
         {
             "select": "*,politicians(*)",
@@ -24,36 +37,68 @@ def get_latest_scores():
     return {"count": len(data), "results": data}
 
 
-# ------------------------------------------------------------
-# 2) TREND HISTORY (last 30 days)
-# ------------------------------------------------------------
+# -------------------------------------------------------------------
+# 2) TREND HISTORY (last 500 entries)
+# -------------------------------------------------------------------
 @router.get("/trends/latest")
 def get_latest_trends():
     """
-    Returns the last 30 days of trend history for each politician.
+    Returns a maximum of 500 most recent trend entries.
     """
-    data = _get(
+    data = fetch_safe(
         "paragon_trends",
         {
             "select": "*,politicians(*)",
             "order": "calculated_at.desc",
-            "limit": 500   # adjust if needed
+            "limit": 500
         }
     )
     return {"count": len(data), "results": data}
 
 
-# ------------------------------------------------------------
-# 3) TOP RISERS (Δ score positive)
-# ------------------------------------------------------------
+# -------------------------------------------------------------------
+# Internal function: compute last deltas per politician
+# -------------------------------------------------------------------
+def compute_deltas(history: List[Dict[str, Any]]) -> Dict[int, Dict[str, Any]]:
+    grouped: Dict[int, List[Dict[str, Any]]] = {}
+
+    # Group by politician_id
+    for row in history:
+        pid = row.get("politician_id")
+        if not pid:
+            continue
+        grouped.setdefault(pid, []).append(row)
+
+    deltas: Dict[int, Dict[str, Any]] = {}
+
+    for pid, rows in grouped.items():
+        if len(rows) < 2:
+            continue
+
+        # Ensure sorted by time
+        rows_sorted = sorted(rows, key=lambda r: r["calculated_at"], reverse=True)
+
+        new_score = rows_sorted[0]["overall_score"]
+        prev_score = rows_sorted[1]["overall_score"]
+        delta = new_score - prev_score
+
+        deltas[pid] = {
+            "politician_id": pid,
+            "name": rows_sorted[0].get("politicians", {}).get("name"),
+            "new_score": new_score,
+            "previous_score": prev_score,
+            "delta": delta,
+        }
+
+    return deltas
+
+
+# -------------------------------------------------------------------
+# 3) TOP RISERS
+# -------------------------------------------------------------------
 @router.get("/trends/top-risers")
 def get_top_risers(limit: int = 10):
-    """
-    Computes top rising politicians based on Δ between last 2 entries.
-    """
-
-    # pull last 2 history rows per politician
-    history = _get(
+    history = fetch_safe(
         "paragon_trends",
         {
             "select": "*,politicians(*)",
@@ -62,45 +107,24 @@ def get_top_risers(limit: int = 10):
         }
     )
 
-    # compute last Δ per politician
-    deltas: Dict[int, Dict[str, Any]] = {}
-    tmp: Dict[int, List[Dict[str, Any]]] = {}
+    deltas = compute_deltas(history)
 
-    for row in history:
-        pid = row["politician_id"]
-        tmp.setdefault(pid, []).append(row)
+    risers = [
+        entry for entry in deltas.values()
+        if entry["delta"] > 0
+    ]
 
-    for pid, rows in tmp.items():
-        if len(rows) < 2:
-            continue
+    sorted_risers = sorted(risers, key=lambda x: x["delta"], reverse=True)
 
-        new = rows[0]["overall_score"]
-        prev = rows[1]["overall_score"]
-        delta = new - prev
-
-        if delta > 0:
-            deltas[pid] = {
-                "politician_id": pid,
-                "name": rows[0].get("politicians", {}).get("name"),
-                "new_score": new,
-                "previous_score": prev,
-                "delta": delta,
-            }
-
-    sorted_list = sorted(deltas.values(), key=lambda x: x["delta"], reverse=True)
-    return {"results": sorted_list[:limit]}
+    return {"count": len(sorted_risers), "results": sorted_risers[:limit]}
 
 
-# ------------------------------------------------------------
-# 4) TOP FALLERS (Δ score negative)
-# ------------------------------------------------------------
+# -------------------------------------------------------------------
+# 4) TOP FALLERS
+# -------------------------------------------------------------------
 @router.get("/trends/top-fallers")
 def get_top_fallers(limit: int = 10):
-    """
-    Computes steepest falling politicians based on Δ between last 2 entries.
-    """
-
-    history = _get(
+    history = fetch_safe(
         "paragon_trends",
         {
             "select": "*,politicians(*)",
@@ -109,29 +133,13 @@ def get_top_fallers(limit: int = 10):
         }
     )
 
-    deltas: Dict[int, Dict[str, Any]] = {}
-    tmp: Dict[int, List[Dict[str, Any]]] = {}
+    deltas = compute_deltas(history)
 
-    for row in history:
-        pid = row["politician_id"]
-        tmp.setdefault(pid, []).append(row)
+    fallers = [
+        entry for entry in deltas.values()
+        if entry["delta"] < 0
+    ]
 
-    for pid, rows in tmp.items():
-        if len(rows) < 2:
-            continue
+    sorted_fallers = sorted(fallers, key=lambda x: x["delta"])
 
-        new = rows[0]["overall_score"]
-        prev = rows[1]["overall_score"]
-        delta = new - prev
-
-        if delta < 0:
-            deltas[pid] = {
-                "politician_id": pid,
-                "name": rows[0].get("politicians", {}).get("name"),
-                "new_score": new,
-                "previous_score": prev,
-                "delta": delta,
-            }
-
-    sorted_list = sorted(deltas.values(), key=lambda x: x["delta"])
-    return {"results": sorted_list[:limit]}
+    return {"count": len(sorted_fallers), "results": sorted_fallers[:limit]}

@@ -11,9 +11,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-COPY novaric-backend/requirements.txt .
+# Copy requirements from repo root (correct path)
+COPY novaric-backend/requirements.txt requirements.txt
 
-RUN pip install --user --no-cache-dir -r requirements.txt
+# Install dependencies to a known directory
+RUN pip install --prefix=/install --no-cache-dir -r requirements.txt
+
 
 
 # ============================
@@ -23,25 +26,23 @@ FROM python:3.11-slim
 
 ENV PYTHONUNBUFFERED=1
 ENV PORT=8080
+ENV PYTHONPATH="/app"
 
 # Create non-root user
 RUN useradd -m appuser
 USER appuser
 
-# Working directory for the application
 WORKDIR /app
 
-# Copy installed dependencies
-COPY --from=builder /root/.local /home/appuser/.local
-ENV PATH=/home/appuser/.local/bin:$PATH
+# Copy installed Python libraries to final image
+COPY --from=builder /install /home/appuser/.local/
+ENV PATH="/home/appuser/.local/bin:${PATH}"
 
-# Copy backend code to /app
-COPY novaric-backend/ /app/
+# Copy backend source code
+COPY --chown=appuser:appuser novaric-backend/ /app/
 
-# Confirm main.py is available
-# (this is where Uvicorn will look: /app/main.py)
-
+# Cloud Run listens on port 8080
 EXPOSE 8080
 
-# Uvicorn start command
+# Start FastAPI app
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]

@@ -239,3 +239,17 @@ def startup_event():
 @app.on_event("shutdown")
 def shutdown_event():
     logger.info("NOVARIC Backend shutting down gracefully.")
+
+
+if __name__ == "__main__":
+    import uvicorn
+    import os
+
+    port = int(os.environ.get("PORT", 8080))
+
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=port,
+        reload=False
+    )

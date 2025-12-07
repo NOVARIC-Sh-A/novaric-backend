@@ -191,3 +191,58 @@ def get_momentum(politician_id: int):
         "previous_score": prev_score,
         "delta": delta
     }
+
+# -------------------------------------------------------------------
+# 6) DASHBOARD AGGREGATOR (one-call endpoint)
+# -------------------------------------------------------------------
+@router.get("/dashboard")
+def get_paragon_dashboard(limit: int = 10):
+    """
+    Returns a full PARAGON dashboard dataset in one API call:
+      - latestScores: sorted by overall_score
+      - topRisers: top Δ positive
+      - topFallers: top Δ negative
+      - recentTrends: last 500 entries
+    """
+
+    # --- Latest Live Scores ---
+    latest_scores = fetch_safe(
+        "paragon_scores",
+        {
+            "select": "*,politicians(*)",
+            "order": "overall_score.desc"
+        }
+    )
+
+    # --- Trend History (global) ---
+    trend_history = fetch_safe(
+        "paragon_trends",
+        {
+            "select": "*,politicians(*)",
+            "order": "calculated_at.desc",
+            "limit": 500
+        }
+    )
+
+    # --- Compute Deltas ---
+    deltas = compute_deltas(trend_history)
+
+    # Risers = Δ > 0
+    top_risers = sorted(
+        [d for d in deltas.values() if d["delta"] > 0],
+        key=lambda x: x["delta"],
+        reverse=True
+    )[:limit]
+
+    # Fallers = Δ < 0
+    top_fallers = sorted(
+        [d for d in deltas.values() if d["delta"] < 0],
+        key=lambda x: x["delta"]
+    )[:limit]
+
+    return {
+        "latestScores": latest_scores,
+        "topRisers": top_risers,
+        "topFallers": top_fallers,
+        "recentTrends": trend_history
+    }

@@ -8,13 +8,17 @@ import os
 # Dynamic data loader
 from utils.data_loader import load_profiles_data
 
+# === NEW IMPORT: PARAGON Analytics Routes ===
+from paragon_api import router as paragon_router
+
+
 # ================================================================
 # FASTAPI APP CONFIGURATION
 # ================================================================
 app = FastAPI(
     title="NOVARIC Backend",
     description="Clinical scoring API for NOVARIC® PARAGON System",
-    version="1.4.0",
+    version="1.5.0",
 )
 
 # ================================================================
@@ -51,6 +55,7 @@ class NewsArticle(BaseModel):
     category: str
     timestamp: str
 
+
 # ================================================================
 # HEALTH CHECK ENDPOINT
 # ================================================================
@@ -64,7 +69,7 @@ def root():
         "message": "NOVARIC PARAGON Engine is Online",
         "profiles_loaded": len(load_profiles_data()),
         "data_source": (
-            "Supabase (Live)" 
+            "Supabase (Live)"
             if os.environ.get("USE_LIVE_DB") == "True"
             else "Local Mocks"
         ),
@@ -86,6 +91,7 @@ def get_profile(profile_id: str):
         raise HTTPException(status_code=404, detail="Profile not found")
 
     return profile
+
 
 # ================================================================
 # PROFILE ANALYSIS
@@ -123,6 +129,7 @@ def analyze_profiles(request: AnalysisRequest):
         )
 
     return AnalysisBatchResponse(analyses=results)
+
 
 # ================================================================
 # INTERNATIONAL NEWS FEEDS
@@ -180,3 +187,9 @@ async def get_news():
             continue
 
     return articles
+
+
+# ================================================================
+# REGISTER PARAGON ANALYTICS ROUTES
+# ================================================================
+app.include_router(paragon_router)

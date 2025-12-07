@@ -8,8 +8,8 @@ import os
 # Dynamic data loader
 from utils.data_loader import load_profiles_data
 
-# === NEW IMPORT: PARAGON Analytics Routes ===
-from paragon_api import router as paragon_router
+# PARAGON Analytics Router (Correct Import)
+from etl.trend_engine import paragon_router
 
 
 # ================================================================
@@ -21,16 +21,18 @@ app = FastAPI(
     version="1.5.0",
 )
 
+
 # ================================================================
 # CORS SETTINGS
 # ================================================================
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],   # Change to production domains later
+    allow_origins=["*"],   # Replace with production domain later
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 
 # ================================================================
 # MODELS
@@ -39,13 +41,16 @@ class AnalysisRequest(BaseModel):
     ids: List[str]
     category: str
 
+
 class AnalysisResponseItem(BaseModel):
     id: str
     overallScore: int
     dimensions: Dict[str, int]
 
+
 class AnalysisBatchResponse(BaseModel):
     analyses: List[AnalysisResponseItem]
+
 
 class NewsArticle(BaseModel):
     id: str
@@ -62,8 +67,7 @@ class NewsArticle(BaseModel):
 @app.get("/")
 def root():
     """
-    Standard health-check endpoint used by Cloud Run.
-    Very lightweight and always succeeds.
+    Lightweight health-check endpoint used by Cloud Run.
     """
     return {
         "message": "NOVARIC PARAGON Engine is Online",
@@ -75,12 +79,14 @@ def root():
         ),
     }
 
+
 # ================================================================
 # PROFILES ENDPOINTS
 # ================================================================
 @app.get("/api/profiles")
 def get_profiles():
     return load_profiles_data()
+
 
 @app.get("/api/profiles/{profile_id}")
 def get_profile(profile_id: str):
@@ -94,7 +100,7 @@ def get_profile(profile_id: str):
 
 
 # ================================================================
-# PROFILE ANALYSIS
+# PROFILE ANALYSIS ENDPOINT
 # ================================================================
 @app.post("/api/profiles/analysis-batch", response_model=AnalysisBatchResponse)
 def analyze_profiles(request: AnalysisRequest):
@@ -114,7 +120,8 @@ def analyze_profiles(request: AnalysisRequest):
 
         dimensions_map = {
             item["dimension"]: item.get("score", 0)
-            for item in analysis if item.get("dimension")
+            for item in analysis
+            if item.get("dimension")
         }
 
         score_values = list(dimensions_map.values())
@@ -149,6 +156,7 @@ RSS_FEEDS = [
     "https://rss.dw.com/xml/rss-en-world",
     "https://news.google.com/rss/search?q=site:apnews.com",
 ]
+
 
 @app.get("/api/v1/news", response_model=List[NewsArticle])
 async def get_news():

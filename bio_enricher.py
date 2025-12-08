@@ -1,156 +1,134 @@
 import os
 import requests
 from bs4 import BeautifulSoup
-from serpapi.google_search import GoogleSearch
+from serpapi import GoogleSearch
+from dotenv import load_dotenv
+
+# LangChain (NEW imports for v0.3+)
+from langchain_core.prompts import PromptTemplate
+from langchain_core.output_parsers import PydanticOutputParser
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain.prompts import PromptTemplate
-from langchain.output_parsers import PydanticOutputParser
+
 from pydantic import BaseModel, Field
 from typing import List
 
-# ============================================================
-# 1. LOAD API KEYS FROM ENVIRONMENT
-# ============================================================
+# Load .env file
+load_dotenv()
+
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 SERPAPI_KEY = os.getenv("SERPAPI_KEY")
 
-if not GOOGLE_API_KEY:
-    raise ValueError("GOOGLE_API_KEY is missing from environment variables.")
-
-if not SERPAPI_KEY:
-    raise ValueError("SERPAPI_KEY is missing from environment variables.")
-
 # ============================================================
-# 2. DEFINE DATA MODELS (Your Media Genome Specification)
+#   1. DATA MODELS
 # ============================================================
-
 class MediaGenome(BaseModel):
     date_of_birth: str = Field(description="YYYY-MM-DD or 'Unknown'")
     place_of_birth: str = Field(description="City, Country")
     career_start_year: int = Field(description="Year they started in media")
 
-    evolutionary_status: str = Field(description="Ascending, Stagnant, Regressing, Compromised")
-    top_rhetoric_shift: str = Field(description="e.g., 'From Investigative to Populist'")
-    lethe_event: str = Field(description="Topic the personality avoids or survived")
+    evolutionary_status: str = Field(
+        description="One of: Ascending, Stagnant, Regressing, Compromised"
+    )
+    top_rhetoric_shift: str = Field(description="Short phrase describing rhetoric evolution")
+    lethe_event: str = Field(description="Topic they avoid discussing recently")
 
     career_start_stats: List[int] = Field(
-        description="[Readiness, Aptitude, Governance, Oversight, CSR] early career scores"
+        description="[Readiness, Aptitude, Governance, Oversight, CSR] at career start"
     )
     current_stats: List[int] = Field(
-        description="[Readiness, Aptitude, Governance, Oversight, CSR] current scores"
+        description="[Readiness, Aptitude, Governance, Oversight, CSR] today"
     )
+
 
 class ProfileData(BaseModel):
     name: str
-    archetype: str = Field(description="Media archetype classification")
-    bio_summary: str = Field(description="Objective summary of the person's background & career")
+    archetype: str
+    bio_summary: str
     genome: MediaGenome
 
-# ============================================================
-# 3. SEARCH & SCRAPE ENGINE — “THE DRAGNET”
-# ============================================================
 
-def search_and_scrape(query: str) -> str:
-    print(f"\n🔎 Searching Google for: {query}")
+# ============================================================
+#   2. SEARCH + SCRAPE (Dragnet)
+# ============================================================
+def search_and_scrape(query):
+    print(f"🔎 Scanning the web for: {query}...")
 
     search = GoogleSearch({
         "q": query,
         "api_key": SERPAPI_KEY,
-        "num": 5
+        "num": 3
     })
 
     results = search.get_dict()
-    organic = results.get("organic_results", [])
-
-    if not organic:
-        print("⚠️ No search results found.")
-        return ""
-
     raw_text = ""
 
-    for result in organic[:5]:
-        link = result.get("link")
-        if not link:
-            continue
-
-        print(f"   --> Scraping: {link}")
-
+    for result in results.get("organic_results", []):
         try:
-            page = requests.get(link, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+            url = result["link"]
+            print(f"   → Extracting: {url}")
+
+            page = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
             soup = BeautifulSoup(page.content, "html.parser")
 
-            paras = soup.find_all("p")
-            extracted = " ".join([p.get_text() for p in paras[:12]])
+            paragraphs = soup.find_all("p")
+            text = " ".join([p.get_text() for p in paragraphs[:10]])
+            raw_text += f"\nSOURCE ({url}):\n{text}\n"
 
-            raw_text += f"\nSOURCE ({link}):\n{extracted}\n"
-
-        except Exception as e:
-            print(f"   ⚠️ Could not scrape {link}: {e}")
+        except Exception:
             continue
 
-    return raw_text.strip()
+    return raw_text
+
 
 # ============================================================
-# 4. GEMINI ANALYSIS ENGINE — “THE CLINICAL EXTRACTOR”
+#   3. GEMINI CLINICAL ANALYSIS
 # ============================================================
+def analyze_profile(name: str):
+    raw_data = search_and_scrape(f"{name} biografia gazetari media polemika")
 
-def analyze_profile(person_name: str) -> ProfileData:
-    """Runs the full enrichment pipeline: scrape → infer → produce Media Genome."""
+    llm = ChatGoogleGenerativeAI(
+        model="gemini-pro",
+        google_api_key=GOOGLE_API_KEY,
+        temperature=0.3
+    )
 
-    # STEP A — Gather raw external info
-    scraped_data = search_and_scrape(f"{person_name} biografia gazetar politikan profile media")
-
-    if not scraped_data:
-        raise RuntimeError("No data scraped — cannot analyze profile.")
-
-    # STEP B — Gemini LLM configuration
-    llm = ChatGoogleGenerativeAI(model="gemini-pro", temperature=0.2)
     parser = PydanticOutputParser(pydantic_object=ProfileData)
 
     prompt = PromptTemplate(
         template="""
-You are **NORA**, the clinical analysis engine of NOVARIC® PARAGON.
+You are NOVARIC's clinical media analyst.
+Analyze the media personality: {target_name}
 
-Analyze the media/political personality: **{name}**  
-using ONLY the factual evidence found in the text below.
+RAW MATERIAL BELOW:
+{raw_data}
 
--------------------------
-SCRAPED RAW DATA:
-{data}
--------------------------
-
-Produce a **neutral, clinical, strictly factual intelligence report**.
-
-RULES:
-- Avoid all emotional, speculative, or defamatory content.
-- Infer trends only from observed career evolution.
-- When unknown, output "Unknown" instead of inventing details.
+INSTRUCTIONS:
+1. Determine evolutionary_status.
+2. Identify rhetoric shift.
+3. Identify a Lethe Event.
+4. Estimate early vs. current MARAGON stats.
+5. Be analytical, neutral, clinical.
 
 {format_instructions}
-""",
-        input_variables=["name", "data"],
-        partial_variables={"format_instructions": parser.get_format_instructions()},
+        """,
+        input_variables=["target_name", "raw_data"],
+        partial_variables={"format_instructions": parser.get_format_instructions()}
     )
 
-    print("\n🧠 Running Gemini Pro Analysis...")
     chain = prompt | llm | parser
 
-    result: ProfileData = chain.invoke({
-        "name": person_name,
-        "data": scraped_data
-    })
-
-    print("✔ Gemini analysis complete.\n")
+    print("🧠 Running Gemini analysis...")
+    result = chain.invoke({"target_name": name, "raw_data": raw_data})
 
     return result
 
-# ============================================================
-# 5. OPTIONAL: RUN LOCALLY FOR TESTING
-# ============================================================
 
+# ============================================================
+#   4. TEST RUN
+# ============================================================
 if __name__ == "__main__":
-    target = "Blendi Fevziu"  # example
-    output = analyze_profile(target)
+    target = "Blendi Fevziu"
+    profile = analyze_profile(target)
 
-    print("\n================== DOSSIER ==================")
-    print(output.json(indent=2))
+    print("\n----- DOSSIER -----")
+    print(profile.json(indent=2))

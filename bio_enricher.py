@@ -1,7 +1,7 @@
 import os
 import requests
 from bs4 import BeautifulSoup
-from serpapi import GoogleSearch
+from serpapi.google_search import GoogleSearch
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain.prompts import PromptTemplate
 from langchain.output_parsers import PydanticOutputParser

@@ -11,7 +11,7 @@ import feedparser
 from utils.data_loader import load_profiles_data
 
 # PARAGON Router (correct import)
-from paragon_api import router as paragon_router
+from .paragon_api import router as paragon_router
 
 
 # ================================================================

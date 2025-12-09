@@ -2,47 +2,36 @@ import os
 import requests
 from bs4 import BeautifulSoup
 from serpapi import GoogleSearch
-from dotenv import load_dotenv
 
-# LangChain (v0.3 compatible)
-from langchain_core.prompts import PromptTemplate
-from langchain_core.output_parsers import PydanticOutputParser
-from langchain_google_genai import ChatGoogleGenerativeAI
+from dotenv import load_dotenv
+load_dotenv()
 
 from pydantic import BaseModel, Field
 from typing import List
 
-# Load API keys
-load_dotenv()
-
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-SERPAPI_KEY = os.getenv("SERPAPI_KEY")
-
-if not GOOGLE_API_KEY:
-    raise ValueError("❌ GOOGLE_API_KEY missing in .env")
-if not SERPAPI_KEY:
-    raise ValueError("❌ SERPAPI_KEY missing in .env")
+from google import genai
 
 
-# ============================================================
-#   1. DATA MODELS
-# ============================================================
+# ============================================
+# 1. DATA MODELS
+# ============================================
+
 class MediaGenome(BaseModel):
     date_of_birth: str = Field(description="YYYY-MM-DD or 'Unknown'")
     place_of_birth: str = Field(description="City, Country")
-    career_start_year: int = Field(description="Year started in media")
+    career_start_year: int = Field(description="Year they started in media")
 
     evolutionary_status: str = Field(
-        description="Ascending, Stagnant, Regressing, Compromised"
+        description="One of: Ascending, Stagnant, Regressing, Compromised"
     )
-    top_rhetoric_shift: str = Field(description="Short phrase summarizing rhetoric evolution")
-    lethe_event: str = Field(description="A topic the personality avoids recently")
+    top_rhetoric_shift: str = Field(description="Short phrase describing rhetoric evolution")
+    lethe_event: str = Field(description="Topic they avoid discussing recently")
 
     career_start_stats: List[int] = Field(
-        description="[Readiness, Aptitude, Governance, Oversight, CSR] initial values (0–100)"
+        description="[Readiness, Aptitude, Governance, Oversight, CSR] at career start"
     )
     current_stats: List[int] = Field(
-        description="[Readiness, Aptitude, Governance, Oversight, CSR] current values (0–100)"
+        description="[Readiness, Aptitude, Governance, Oversight, CSR] today"
     )
 
 
@@ -53,15 +42,16 @@ class ProfileData(BaseModel):
     genome: MediaGenome
 
 
-# ============================================================
-#   2. SEARCH & SCRAPE (Dragnet)
-# ============================================================
-def search_and_scrape(query):
+# ============================================
+# 2. SEARCH + SCRAPE (DRAGNET)
+# ============================================
+
+def search_and_scrape(query: str) -> str:
     print(f"🔎 Scanning the web for: {query}...")
 
     search = GoogleSearch({
         "q": query,
-        "api_key": SERPAPI_KEY,
+        "api_key": os.getenv("SERPAPI_KEY"),
         "num": 3
     })
 
@@ -77,68 +67,64 @@ def search_and_scrape(query):
             soup = BeautifulSoup(page.content, "html.parser")
 
             paragraphs = soup.find_all("p")
-            extracted = " ".join([p.get_text() for p in paragraphs[:10]])
+            text = " ".join([p.get_text() for p in paragraphs[:10]])
 
-            raw_text += f"\nSOURCE ({url}):\n{extracted}\n"
+            raw_text += f"\nSOURCE ({url}):\n{text}\n"
 
-        except Exception as e:
-            print(f"   ⚠️ Error extracting {url}: {e}")
+        except Exception:
             continue
 
     return raw_text
 
 
-# ============================================================
-#   3. GEMINI ADVANCED CLINICAL ANALYSIS
-# ============================================================
+# ============================================
+# 3. GEMINI 1.5 ANALYSIS (NEW ENGINE)
+# ============================================
+
 def analyze_profile(name: str):
     raw_data = search_and_scrape(f"{name} biografia gazetari media polemika")
 
-    llm = ChatGoogleGenerativeAI(
-        model="gemini-1.5-flash",       # FIXED MODEL
-        google_api_key=GOOGLE_API_KEY,
-        temperature=0.2
-    )
+    client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
 
-    parser = PydanticOutputParser(pydantic_object=ProfileData)
-
-    prompt = PromptTemplate(
-        template="""
+    system_prompt = f"""
 You are NOVARIC's clinical media analyst.
+Analyze the media personality: {name}
 
-Analyze the media personality: {target_name}
-
-RAW GATHERED MATERIAL:
+RAW MATERIAL:
 {raw_data}
 
-INSTRUCTIONS:
-1. Determine their evolutionary_status.
-2. Identify a clear top_rhetoric_shift.
-3. Identify one Lethe Event (topic they avoid).
-4. Estimate MARAGON stats (start vs. now).
-5. Produce a clinical, neutral, non-emotional summary.
-6. Output MUST follow the required JSON schema.
+Your task:
+1. Infer evolutionary_status.
+2. Identify rhetoric shift.
+3. Identify Lethe Event (topics avoided recently).
+4. Generate MARAGON stats for early career vs. today.
+5. Produce a neutral, clinical summary.
+6. Return ONLY valid JSON following this schema:
 
-{format_instructions}
-""",
-        input_variables=["target_name", "raw_data"],
-        partial_variables={"format_instructions": parser.get_format_instructions()}
+{ProfileData.model_json_schema()}
+"""
+
+    print("🧠 Running Gemini 1.5 Flash analysis...")
+
+    resp = client.models.generate_content(
+        model="gemini-1.5-flash",
+        contents=system_prompt,
+        generation_config={"temperature": 0.3}
     )
 
-    chain = prompt | llm | parser
+    json_text = resp.text.strip()
 
-    print("🧠 Running Gemini analysis...")
-    result = chain.invoke({"target_name": name, "raw_data": raw_data})
-
-    return result
+    # Parse into Pydantic model
+    return ProfileData.model_validate_json(json_text)
 
 
-# ============================================================
-#   4. DIRECT TEST RUN
-# ============================================================
+# ============================================
+# 4. TEST RUN
+# ============================================
+
 if __name__ == "__main__":
     target = "Blendi Fevziu"
     profile = analyze_profile(target)
 
-    print("\n===== DOSSIER GENERATED =====")
+    print("\n----- DOSSIER -----")
     print(profile.json(indent=2))

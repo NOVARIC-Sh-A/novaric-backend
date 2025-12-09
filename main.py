@@ -7,15 +7,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import feedparser
 
-# NOVARIC Data Loader (local or Supabase-driven)
+# NOVARIC Data Loader
 from utils.data_loader import load_profiles_data
 
-# PARAGON Router (correct import)
-from .paragon_api import router as paragon_router
+# PARAGON Router
+from paragon_api import router as paragon_router
 
 
 # ================================================================
-# LOGGING CONFIGURATION — Cloud Run Compatible
+# LOGGING
 # ================================================================
 logging.basicConfig(
     level=logging.INFO,
@@ -26,21 +26,21 @@ logger = logging.getLogger("novaric-backend")
 
 
 # ================================================================
-# FASTAPI APP INITIALIZATION
+# FASTAPI APP
 # ================================================================
 app = FastAPI(
     title="NOVARIC Backend",
-    description="Clinical scoring API for NOVARIC® PARAGON System",
-    version="1.6.0",
+    description="NOVARIC® PARAGON scoring + News Aggregation API",
+    version="1.7.0",
 )
 
 
 # ================================================================
-# CORS CONFIGURATION
+# CORS
 # ================================================================
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Replace with production domain
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -48,7 +48,7 @@ app.add_middleware(
 
 
 # ================================================================
-# DATA MODELS
+# MODELS
 # ================================================================
 class AnalysisRequest(BaseModel):
     ids: List[str]
@@ -75,11 +75,10 @@ class NewsArticle(BaseModel):
 
 
 # ================================================================
-# HEALTH CHECKS
+# HEALTH CHECK
 # ================================================================
 @app.get("/")
 def root():
-    """Lightweight Cloud Run health + metadata endpoint."""
     try:
         profiles_count = len(load_profiles_data())
     except Exception:
@@ -100,12 +99,11 @@ def root():
 
 @app.get("/healthz")
 def health_probe():
-    """Used by Cloud Run to confirm the service is alive."""
     return {"status": "healthy"}
 
 
 # ================================================================
-# PROFILES ENDPOINTS
+# PROFILES
 # ================================================================
 @app.get("/api/profiles")
 def get_profiles():
@@ -115,32 +113,30 @@ def get_profiles():
 
 @app.get("/api/profiles/{profile_id}")
 def get_profile(profile_id: str):
-    logger.info(f"Profile lookup requested for ID={profile_id}")
+    logger.info(f"Profile lookup requested: {profile_id}")
 
     profiles = load_profiles_data()
-    profile = next((p for p in profiles if str(p["id"]) == profile_id), None)
+    found = next((p for p in profiles if str(p["id"]) == profile_id), None)
 
-    if not profile:
-        logger.warning(f"Profile not found: {profile_id}")
+    if not found:
         raise HTTPException(status_code=404, detail="Profile not found")
 
-    return profile
+    return found
 
 
 # ================================================================
-# PROFILE ANALYSIS ENDPOINT
+# ANALYSIS ENDPOINT
 # ================================================================
 @app.post("/api/profiles/analysis-batch", response_model=AnalysisBatchResponse)
 def analyze_profiles(request: AnalysisRequest):
-    logger.info(f"Batch analysis requested for {len(request.ids)} profiles")
-
     profiles = load_profiles_data()
     results = []
 
-    for profile_id in request.ids:
-        profile = next((p for p in profiles if str(p["id"]) == profile_id), None)
+    for pid in request.ids:
+        profile = next((p for p in profiles if str(p["id"]) == pid), None)
+
         if not profile:
-            logger.warning(f"Profile missing during analysis: {profile_id}")
+            logger.warning(f"Profile missing in batch request: {pid}")
             continue
 
         analysis = (
@@ -149,20 +145,19 @@ def analyze_profiles(request: AnalysisRequest):
             or []
         )
 
-        dimensions_map = {
+        dims = {
             item["dimension"]: item.get("score", 0)
-            for item in analysis
-            if item.get("dimension")
+            for item in analysis if item.get("dimension")
         }
 
-        values = list(dimensions_map.values())
-        overall = int(sum(values) / len(values)) if values else 0
+        vals = list(dims.values())
+        overall = int(sum(vals) / len(vals)) if vals else 0
 
         results.append(
             AnalysisResponseItem(
-                id=profile_id,
+                id=pid,
                 overallScore=overall,
-                dimensions=dimensions_map
+                dimensions=dims
             )
         )
 
@@ -170,86 +165,106 @@ def analyze_profiles(request: AnalysisRequest):
 
 
 # ================================================================
-# NEWS AGGREGATION (RSS)
+# NEWS AGGREGATION (International + Albanian)
 # ================================================================
-RSS_FEEDS = [
+INTERNATIONAL_FEEDS = [
     "https://rss.cnn.com/rss/edition.rss",
     "https://feeds.bbci.co.uk/news/rss.xml",
     "https://rss.nytimes.com/services/xml/rss/nyt/World.xml",
     "https://www.aljazeera.com/xml/rss/all.xml",
-    "https://news.google.com/rss/search?q=site:reuters.com",
+    "http://feeds.reuters.com/reuters/worldNews",
+    "https://www.theguardian.com/world/rss",
+    "https://www.france24.com/en/rss",
+    "http://feeds.washingtonpost.com/rss/world",
+    "https://time.com/feed/world/",
+    "https://apnews.com/feed/rss",
 ]
+
+ALBANIAN_FEEDS = [
+    "https://top-channel.tv/rss",
+    "https://balkanweb.com/feed",
+    "https://faxweb.al/feed",
+    "https://euronews.al/feed",
+]
+
+ALL_FEEDS = (
+    [(url, "International") for url in INTERNATIONAL_FEEDS] +
+    [(url, "Albanian") for url in ALBANIAN_FEEDS]
+)
 
 
 @app.get("/api/v1/news", response_model=List[NewsArticle])
 async def get_news():
-    logger.info("Fetching international news feeds")
+    logger.info("Fetching news (International + Albanian)")
 
     articles = []
 
-    for url in RSS_FEEDS:
+    for url, category in ALL_FEEDS:
         try:
             feed = feedparser.parse(url)
-            if feed.bozo and feed.status not in (200, 301):
-                logger.error(f"Bad RSS Feed: {url}")
+            status = getattr(feed, "status", 200)
+
+            if feed.bozo and status not in (200, 301):
+                logger.error(f"Malformed feed: {url}")
                 continue
 
-            for entry in feed.entries[:5]:
+            for entry in feed.entries[:7]:
                 article_id = entry.get("id") or entry.get("link", "unknown")
 
-                image_url = (
-                    entry.media_content[0].get("url", "")
-                    if hasattr(entry, "media_content") and entry.media_content
-                    else ""
-                )
+                # image extraction fallback
+                image = ""
+                if hasattr(entry, "media_content") and entry.media_content:
+                    image = entry.media_content[0].get("url", "")
+                elif hasattr(entry, "media_thumbnail") and entry.media_thumbnail:
+                    image = entry.media_thumbnail[0].get("url", "")
+                elif hasattr(entry, "links"):
+                    for link in entry.links:
+                        if link.get("type", "").startswith("image"):
+                            image = link.get("href", "")
+                            break
 
                 articles.append(
                     NewsArticle(
                         id=str(article_id),
                         title=entry.get("title", "No Title"),
                         content=(entry.get("summary", "")[:300] + "..."),
-                        imageUrl=image_url,
-                        category="International",
-                        timestamp=entry.get("published", "Unknown"),
+                        imageUrl=image,
+                        category=category,
+                        timestamp=entry.get(
+                            "published",
+                            entry.get("updated", "Unknown")
+                        ),
                     )
                 )
 
         except Exception as e:
-            logger.exception(f"Feed parsing error for {url}: {e}")
+            logger.exception(f"RSS parsing exception: {url} -> {e}")
             continue
 
-    logger.info(f"News articles delivered: {len(articles)}")
+    logger.info(f"News delivered: {len(articles)}")
     return articles
 
 
 # ================================================================
-# REGISTER PARAGON ANALYTICS ROUTER
+# ROUTERS
 # ================================================================
 app.include_router(paragon_router)
 
 
 # ================================================================
-# STARTUP & SHUTDOWN EVENTS
+# STARTUP / SHUTDOWN
 # ================================================================
 @app.on_event("startup")
 def startup_event():
-    logger.info("NOVARIC Backend has started successfully.")
+    logger.info("NOVARIC Backend started successfully.")
 
 
 @app.on_event("shutdown")
 def shutdown_event():
-    logger.info("NOVARIC Backend shutting down gracefully.")
+    logger.info("NOVARIC Backend shutting down.")
 
 
 if __name__ == "__main__":
     import uvicorn
-    import os
-
     port = int(os.environ.get("PORT", 8080))
-
-    uvicorn.run(
-        "main:app",
-        host="0.0.0.0",
-        port=port,
-        reload=False
-    )
+    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)

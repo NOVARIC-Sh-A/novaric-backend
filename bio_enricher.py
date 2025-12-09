@@ -1,47 +1,54 @@
 import os
 import json
 import requests
-from bs4 import BeautifulSoup
-from serpapi import GoogleSearch
-
-from dotenv import load_dotenv
-load_dotenv()
-
-from pydantic import BaseModel, Field
 from typing import List
 
-from google import genai
+from bs4 import BeautifulSoup
+from serpapi import GoogleSearch
+from dotenv import load_dotenv
+from pydantic import BaseModel, Field
+import google.generativeai as genai
 
+load_dotenv()
 
-# ============================================
+# ============================================================
 # 1. DATA MODELS
-# ============================================
+# ============================================================
 
 class MediaGenome(BaseModel):
-    date_of_birth: str
-    place_of_birth: str
-    career_start_year: int
+    date_of_birth: str = Field(..., description="Birth date in ISO or textual format")
+    place_of_birth: str = Field(..., description="Birthplace: city, region, country")
+    career_start_year: int = Field(..., description="Approximate year career began")
 
-    evolutionary_status: str
-    top_rhetoric_shift: str
-    lethe_event: str
+    evolutionary_status: str = Field(..., description="Subject’s professional evolution")
+    top_rhetoric_shift: str = Field(..., description="Most notable rhetorical shift")
+    lethe_event: str = Field(..., description="Pivotal reinvention / forgetting moment")
 
-    career_start_stats: List[int]
-    current_stats: List[int]
+    career_start_stats: List[int] = Field(
+        ..., min_items=5, max_items=5, description="MARAGON stats at early career"
+    )
+    current_stats: List[int] = Field(
+        ..., min_items=5, max_items=5, description="MARAGON stats at current stage"
+    )
 
 
 class ProfileData(BaseModel):
     name: str
-    archetype: str
-    bio_summary: str
+    archetype: str = Field(..., description="Persona archetype")
+    bio_summary: str = Field(..., description="150–250 word neutral biography")
     genome: MediaGenome
 
 
-# ============================================
-# 2. SEARCH + SCRAPE (DRAGNET)
-# ============================================
+# ============================================================
+# 2. SERPAPI SEARCH + SCRAPE
+# ============================================================
 
-def search_and_scrape(query: str) -> str:
+def search_and_scrape_media(name: str) -> str:
+    """
+    Dragnet for media personality information.
+    Extracts first 10 paragraphs from top SerpAPI results.
+    """
+    query = f"{name} biografia gazetari media polemika karriera intervista"
     print(f"🔎 Scanning the web for: {query}...")
 
     search = GoogleSearch({
@@ -58,9 +65,13 @@ def search_and_scrape(query: str) -> str:
             url = result["link"]
             print(f"   → Extracting: {url}")
 
-            page = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
-            soup = BeautifulSoup(page.content, "html.parser")
+            page = requests.get(
+                url,
+                headers={"User-Agent": "Mozilla/5.0"},
+                timeout=10
+            )
 
+            soup = BeautifulSoup(page.content, "html.parser")
             paragraphs = soup.find_all("p")
             text = " ".join(p.get_text() for p in paragraphs[:10])
 
@@ -72,72 +83,80 @@ def search_and_scrape(query: str) -> str:
     return raw_text
 
 
-# ============================================
-# 3. GEMINI 2.5 FLASH ANALYSIS
-# ============================================
+# ============================================================
+# 3. GEMINI 2.5 FLASH — PROFILE GENERATION
+# ============================================================
 
-def analyze_profile(name: str):
-    raw_data = search_and_scrape(f"{name} biografia gazetari media polemika")
+def analyze_profile(name: str) -> ProfileData:
+    """
+    Produces a NOVARIC-style structured profile using Gemini 2.5 Flash.
+    """
 
-    client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
+    raw_data = search_and_scrape_media(name)
 
-    system_prompt = f"""
+    # NEW SDK syntax
+    genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
+    model = genai.GenerativeModel("gemini-2.5-flash")
+
+    # Example schema for strict adherence
+    schema_example = {
+        "name": name,
+        "archetype": "Investigative Maverick",
+        "bio_summary": "150–250 word neutral biography.",
+        "genome": {
+            "date_of_birth": "YYYY-MM-DD",
+            "place_of_birth": "City, Region, Country",
+            "career_start_year": 2000,
+            "evolutionary_status": "Summary of evolution",
+            "top_rhetoric_shift": "Major rhetorical shift",
+            "lethe_event": "Key reinvention moment",
+            "career_start_stats": [20, 30, 25, 35, 40],
+            "current_stats": [70, 80, 65, 75, 85]
+        }
+    }
+
+    prompt = f"""
 You are NOVARIC's clinical media analyst.
-Analyze the media personality: {name}
+
+Generate a structured and neutral MARAGON profile for the media personality: "{name}".
 
 RAW MATERIAL:
 {raw_data}
 
-Your task:
-1. Infer evolutionary_status.
-2. Identify rhetoric shift.
-3. Identify Lethe Event.
-4. Generate MARAGON stats for early career vs current.
-5. Provide a neutral and clinical summary.
+Instructions:
+- Maintain strict neutrality and factual tone.
+- If uncertain, return "Unknown".
+- MARAGON stats must contain exactly 5 integers (0–100).
+- Avoid exaggeration, assumptions, or defamatory claims.
+- Aim for analytical precision.
 
-Return ONLY valid JSON in the format:
-
-{{
-  "name": "...",
-  "archetype": "...",
-  "bio_summary": "...",
-  "genome": {{
-      "date_of_birth": "...",
-      "place_of_birth": "...",
-      "career_start_year": 0,
-      "evolutionary_status": "...",
-      "top_rhetoric_shift": "...",
-      "lethe_event": "...",
-      "career_start_stats": [0,0,0,0,0],
-      "current_stats": [0,0,0,0,0]
-  }}
-}}
+Return ONLY valid JSON following this structure:
+{json.dumps(schema_example, indent=2)}
 """
 
-    print("🧠 Running Gemini 2.5 Flash analysis...")
+    print("🧠 Running Gemini 2.5 Flash media profile analysis...")
 
-    resp = client.models.generate_content(
-        model="models/gemini-2.5-flash",
-        contents=system_prompt,
-        generation_config={"temperature": 0.3}
+    response = model.generate_content(
+        prompt,
+        generation_config={"temperature": 0.25}
     )
 
-    json_text = resp.text.strip()
+    json_text = response.text.strip()
 
-    # Strip Markdown markers if needed
+    # Remove markdown fencing if present
     if json_text.startswith("```"):
-        json_text = json_text.strip("```").replace("json", "").strip()
+        json_text = json_text.strip("`").replace("json", "", 1).strip()
 
     return ProfileData.model_validate_json(json_text)
 
 
-# ============================================
+# ============================================================
 # 4. TEST RUN
-# ============================================
+# ============================================================
 
 if __name__ == "__main__":
     target = "Blendi Fevziu"
     profile = analyze_profile(target)
 
-    print("\n----- DOSSIER -----")
-    print(profile.json(indent=2))
+    print("\n----- MEDIA DOSSIER -----")
+    print(profile.model_dump_json(indent=2, ensure_ascii=False))

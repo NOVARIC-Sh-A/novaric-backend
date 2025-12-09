@@ -1,4 +1,5 @@
 import os
+import json
 import requests
 from bs4 import BeautifulSoup
 from serpapi import GoogleSearch
@@ -17,22 +18,16 @@ from google import genai
 # ============================================
 
 class MediaGenome(BaseModel):
-    date_of_birth: str = Field(description="YYYY-MM-DD or 'Unknown'")
-    place_of_birth: str = Field(description="City, Country")
-    career_start_year: int = Field(description="Year they started in media")
+    date_of_birth: str
+    place_of_birth: str
+    career_start_year: int
 
-    evolutionary_status: str = Field(
-        description="One of: Ascending, Stagnant, Regressing, Compromised"
-    )
-    top_rhetoric_shift: str = Field(description="Short phrase describing rhetoric evolution")
-    lethe_event: str = Field(description="Topic they avoid discussing recently")
+    evolutionary_status: str
+    top_rhetoric_shift: str
+    lethe_event: str
 
-    career_start_stats: List[int] = Field(
-        description="[Readiness, Aptitude, Governance, Oversight, CSR] at career start"
-    )
-    current_stats: List[int] = Field(
-        description="[Readiness, Aptitude, Governance, Oversight, CSR] today"
-    )
+    career_start_stats: List[int]
+    current_stats: List[int]
 
 
 class ProfileData(BaseModel):
@@ -67,7 +62,7 @@ def search_and_scrape(query: str) -> str:
             soup = BeautifulSoup(page.content, "html.parser")
 
             paragraphs = soup.find_all("p")
-            text = " ".join([p.get_text() for p in paragraphs[:10]])
+            text = " ".join(p.get_text() for p in paragraphs[:10])
 
             raw_text += f"\nSOURCE ({url}):\n{text}\n"
 
@@ -78,7 +73,7 @@ def search_and_scrape(query: str) -> str:
 
 
 # ============================================
-# 3. GEMINI 1.5 ANALYSIS (NEW ENGINE)
+# 3. GEMINI 2.5 FLASH ANALYSIS
 # ============================================
 
 def analyze_profile(name: str):
@@ -96,25 +91,43 @@ RAW MATERIAL:
 Your task:
 1. Infer evolutionary_status.
 2. Identify rhetoric shift.
-3. Identify Lethe Event (topics avoided recently).
-4. Generate MARAGON stats for early career vs. today.
-5. Produce a neutral, clinical summary.
-6. Return ONLY valid JSON following this schema:
+3. Identify Lethe Event.
+4. Generate MARAGON stats for early career vs current.
+5. Provide a neutral and clinical summary.
 
-{ProfileData.model_json_schema()}
+Return ONLY valid JSON in the format:
+
+{{
+  "name": "...",
+  "archetype": "...",
+  "bio_summary": "...",
+  "genome": {{
+      "date_of_birth": "...",
+      "place_of_birth": "...",
+      "career_start_year": 0,
+      "evolutionary_status": "...",
+      "top_rhetoric_shift": "...",
+      "lethe_event": "...",
+      "career_start_stats": [0,0,0,0,0],
+      "current_stats": [0,0,0,0,0]
+  }}
+}}
 """
 
-    print("🧠 Running Gemini 1.5 Flash analysis...")
+    print("🧠 Running Gemini 2.5 Flash analysis...")
 
     resp = client.models.generate_content(
-        model="gemini-1.5-flash",
+        model="models/gemini-2.5-flash",
         contents=system_prompt,
         generation_config={"temperature": 0.3}
     )
 
     json_text = resp.text.strip()
 
-    # Parse into Pydantic model
+    # Strip Markdown markers if needed
+    if json_text.startswith("```"):
+        json_text = json_text.strip("```").replace("json", "").strip()
+
     return ProfileData.model_validate_json(json_text)
 
 

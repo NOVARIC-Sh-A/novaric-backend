@@ -95,7 +95,7 @@ def analyze_profile(name: str):
     raw_data = search_and_scrape(f"{name} biografia gazetari media polemika")
 
     llm = ChatGoogleGenerativeAI(
-        model="models/gemini-1.5-flash",       # FIXED MODEL
+        model="gemini-1.5-flash",       # FIXED MODEL
         google_api_key=GOOGLE_API_KEY,
         temperature=0.2
     )

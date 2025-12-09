@@ -3,6 +3,9 @@ import requests
 from bs4 import BeautifulSoup
 from serpapi import GoogleSearch
 
+from dotenv import load_dotenv
+load_dotenv()
+
 from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import PydanticOutputParser
 from langchain_google_genai import ChatGoogleGenerativeAI

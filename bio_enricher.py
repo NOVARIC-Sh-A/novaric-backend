@@ -1,12 +1,12 @@
 import os
 import requests
 from bs4 import BeautifulSoup
-from serpapi import GoogleSearch
-from dotenv import load_dotenv
 
-# LangChain (NEW imports for v0.3+)
-from langchain_core.prompts import PromptTemplate
-from langchain_core.output_parsers import PydanticOutputParser
+# Correct SerpApi import
+from serpapi import GoogleSearch
+
+from langchain.prompts import PromptTemplate
+from langchain.output_parsers import PydanticOutputParser
 from langchain_google_genai import ChatGoogleGenerativeAI
 
 from pydantic import BaseModel, Field

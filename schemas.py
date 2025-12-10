@@ -1,24 +1,79 @@
 from pydantic import BaseModel, Field
 from typing import List, Optional
 
-class AI_Extraction_Output(BaseModel):
+
+class ExperienceItem(BaseModel):
+    role: Optional[str]
+    organization: Optional[str]
+    start_date: Optional[str]
+    end_date: Optional[str]
+    description: Optional[str]
+
+
+class EducationItem(BaseModel):
+    institution: Optional[str]
+    degree: Optional[str]
+    field_of_study: Optional[str]
+    start_year: Optional[int]
+    end_year: Optional[int]
+
+
+class ChecklistItem(BaseModel):
+    id: str
+    category: str
+    task: str
+    academic_ref: str
+    is_completed: bool
+    priority: str
+
+
+class VipProfileResponse(BaseModel):
     """
-    The strict contract for what the AI must return from a news article.
+    Final enriched VIP profile schema used by GET /profile/{profile_id}.
+    This schema consolidates all fields referenced in the DB + enrichment layer.
     """
-    # 1. Relevance Filter
-    is_political_event: bool = Field(..., description="True if this is about politics/governance")
-    
-    # 2. Sentiment (The Raw Signal)
-    sentiment_score: float = Field(..., description="Sentiment from -1.0 (Very Negative) to 1.0 (Very Positive)")
-    
-    # 3. Categorization
-    primary_topic: str = Field(..., description="e.g., 'Economy', 'Corruption', 'Diplomacy', 'Public Works'")
-    
-    # 4. Critical Flags (The Hybrid Triggers - Mapped to PARAGON Dimensions)
-    has_corruption_allegation: bool = Field(False, description="True if article mentions bribery, abuse of office, SPAK")
-    has_legislative_action: bool = Field(False, description="True if politician proposed/voted on law")
-    has_international_endorsement: bool = Field(False, description="True if supported by EU/USA/NATO representatives")
-    has_public_outcry: bool = Field(False, description="True if article mentions protests or public anger")
-    
-    # 5. Summary
-    brief_summary: str = Field(..., description="1-sentence summary of the event")
+
+    # Core identity
+    id: str
+    name: str
+    gender: Optional[str]
+    date_of_birth: Optional[str]
+    nationality: Optional[str]
+
+    # Profile content
+    bio: Optional[str]
+    headline: Optional[str]  # short tagline, e.g., "Minister of Finance"
+
+    # Contact / URLs
+    linkedin_url: Optional[str]
+    twitter_url: Optional[str]
+    facebook_url: Optional[str]
+    instagram_url: Optional[str]
+    portfolio_url: Optional[str]
+    official_website: Optional[str]
+
+    # Skills & Attributes
+    skills: Optional[List[str]] = Field(default_factory=list)
+    languages: Optional[List[str]] = Field(default_factory=list)
+
+    # Experience & Education
+    experience: Optional[List[ExperienceItem]] = Field(default_factory=list)
+    education: Optional[List[EducationItem]] = Field(default_factory=list)
+
+    # Political / Public-sector fields
+    current_position: Optional[str]
+    political_party: Optional[str]
+    region: Optional[str]
+    is_active_politician: Optional[bool]
+
+    # Metadata
+    created_at: Optional[str]
+    updated_at: Optional[str]
+    profile_image_url: Optional[str]
+    verified: Optional[bool] = False
+
+    # AI enrichment output (new)
+    improvement_checklist: Optional[List[ChecklistItem]] = Field(
+        default_factory=list,
+        description="AI-generated improvement recommendations for the profile."
+    )

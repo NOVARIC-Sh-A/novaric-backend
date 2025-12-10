@@ -1,56 +1,43 @@
-from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
-from typing import Optional
+from fastapi import APIRouter, HTTPException, Depends
+from supabase import create_client, Client
+from profile_advisor import ProfileAdvisor
 
-# Import your existing pipeline functions
-from bio_enricher import analyze_profile as analyze_media_profile
-from bio_hunter import analyze_politician
+router = APIRouter()
 
-router = APIRouter(
-    prefix="/api/profiles",
-    tags=["Profile Enrichment"]
-)
+# Example Supabase client init (update with your real values or dependency-injection)
+SUPABASE_URL = "https://YOUR_URL.supabase.co"
+SUPABASE_KEY = "YOUR_SUPABASE_KEY"
 
-# ==============================
-# REQUEST MODELS
-# ==============================
-
-class MediaProfileRequest(BaseModel):
-    name: str
+def get_supabase() -> Client:
+    return create_client(SUPABASE_URL, SUPABASE_KEY)
 
 
-class PoliticianProfileRequest(BaseModel):
-    name: str
-    country: Optional[str] = "Albania"
+@router.get("/profile/{profile_id}", response_model=VipProfileResponse)
+async def get_profile(profile_id: str, supabase: Client = Depends(get_supabase)):
 
+    # 1. Fetch raw profile from Supabase
+    result = (
+        supabase
+        .table("profiles")
+        .select("*")
+        .eq("id", profile_id)
+        .single()
+        .execute()
+    )
 
-# ==============================
-# MEDIA PERSONALITY ENDPOINT
-# ==============================
+    profile_data = result.data
 
-@router.post("/media")
-def generate_media_profile(payload: MediaProfileRequest):
-    """
-    Generates MARAGON-style enriched media personality profiles.
-    """
-    try:
-        profile = analyze_media_profile(payload.name)
-        return profile.model_dump()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    if not profile_data:
+        raise HTTPException(status_code=404, detail="Profile not found")
 
+    # 2. Run the Profile Advisor (AI psychologist)
+    advisor = ProfileAdvisor(profile_data)
+    improvement_checklist = advisor.generate_checklist()
 
-# ==============================
-# POLITICIAN ENDPOINT
-# ==============================
+    # 3. Attach the checklist to the response
+    response_data = {
+        **profile_data,
+        "improvement_checklist": improvement_checklist
+    }
 
-@router.post("/politician")
-def generate_politician_profile(payload: PoliticianProfileRequest):
-    """
-    Generates structured PARAGON-ready political profiles.
-    """
-    try:
-        profile = analyze_politician(payload.name, payload.country)
-        return profile.model_dump()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    return response_data

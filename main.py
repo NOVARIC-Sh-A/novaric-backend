@@ -7,19 +7,18 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import feedparser
 
-# Data Loader (legacy MARAGON compatibility)
+# Data Loader (legacy compatibility)
 from utils.data_loader import load_profiles_data
 
 # Routers
 from paragon_api import router as paragon_router
 from routers.profile_enrichment import router as enrichment_router
 
-# Centralized Feed Registry
+# Feed Registry
 from config.rss_feeds import (
     TIER1_GLOBAL_NEWS,
     ALBANIAN_MEDIA_FEEDS,
 )
-
 
 # ================================================================
 # LOGGING
@@ -46,7 +45,7 @@ app = FastAPI(
 # ================================================================
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],  # Allow all origins
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -81,7 +80,7 @@ class NewsArticle(BaseModel):
 
 
 # ================================================================
-# HEALTH CHECK
+# HEALTH CHECK (Cloud Run)
 # ================================================================
 @app.get("/")
 def root():
@@ -107,7 +106,7 @@ def health_probe():
 
 
 # ================================================================
-# PROFILES (Legacy local JSON)
+# PROFILES (Legacy MARAGON)
 # ================================================================
 @app.get("/api/profiles")
 def get_profiles():
@@ -126,7 +125,7 @@ def get_profile(profile_id: str):
 
 
 # ================================================================
-# ANALYSIS BATCH (Legacy MARAGON)
+# ANALYSIS BATCH (Legacy)
 # ================================================================
 @app.post("/api/profiles/analysis-batch", response_model=AnalysisBatchResponse)
 def analyze_profiles(request: AnalysisRequest):
@@ -139,7 +138,11 @@ def analyze_profiles(request: AnalysisRequest):
         if not profile:
             continue
 
-        analysis = profile.get("maragonAnalysis") or profile.get("paragonAnalysis") or []
+        analysis = (
+            profile.get("maragonAnalysis")
+            or profile.get("paragonAnalysis")
+            or []
+        )
 
         dims = {
             item["dimension"]: item.get("score", 0)
@@ -161,14 +164,14 @@ def analyze_profiles(request: AnalysisRequest):
 
 
 # ================================================================
-# NEWS AGGREGATION
+# NEWS AGGREGATION (V1 API)
 # ================================================================
 INTERNATIONAL_FEEDS = TIER1_GLOBAL_NEWS
 ALBANIAN_FEEDS = ALBANIAN_MEDIA_FEEDS
 
 ALL_FEEDS = (
-    [(url, "International") for url in INTERNATIONAL_FEEDS] +
-    [(url, "Albanian") for url in ALBANIAN_FEEDS]
+    [(url, "International") for url in INTERNATIONAL_FEEDS]
+    + [(url, "Albanian") for url in ALBANIAN_FEEDS]
 )
 
 
@@ -204,10 +207,12 @@ async def get_news():
                         content=(entry.get("summary", "")[:300] + "..."),
                         imageUrl=image,
                         category=category,
-                        timestamp=entry.get("published", entry.get("updated", "Unknown")),
+                        timestamp=entry.get(
+                            "published",
+                            entry.get("updated", "Unknown")
+                        ),
                     )
                 )
-
         except Exception:
             continue
 
@@ -226,12 +231,12 @@ app.include_router(enrichment_router)
 # ================================================================
 @app.on_event("startup")
 def startup_event():
-    logging.info("NOVARIC Backend started.")
+    logger.info("NOVARIC Backend started.")
 
 
 @app.on_event("shutdown")
 def shutdown_event():
-    logging.info("NOVARIC Backend stopped.")
+    logger.info("NOVARIC Backend stopped.")
 
 
 # ================================================================

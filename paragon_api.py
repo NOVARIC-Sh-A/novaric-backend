@@ -18,6 +18,14 @@ from etl.metric_loader import load_metrics_for
 from etl.scoring_engine import score_metrics
 from etl.trend_engine import record_paragon_snapshot
 
+
+# Initialize PARAGON Engine early
+try:
+    print("✔ PARAGON Engine: metric_loader + scoring_engine active")
+except Exception as e:
+    print(f"✖ PARAGON Engine initialization failed: {e}")
+
+
 router = APIRouter(
     prefix="/api/paragon",
     tags=["PARAGON Analytics"]
@@ -52,9 +60,10 @@ def _normalize_paragon_row(row: Dict[str, Any]) -> Dict[str, Any]:
     }
     """
 
+    # Pull stored JSONB field (may be NULL)
     dims = row.get("dimensions_json") or []
 
-    # backward-compatibility for old frontend components
+    # Convert into old structure for FE charts
     dimensions = [
         {
             "dimension": d.get("dimension"),
@@ -287,23 +296,20 @@ def get_paragon_dashboard(limit: int = 10):
 def recompute_paragon_score(politician_id: int):
 
     try:
-        # 1. Load all raw metrics
         metrics = load_metrics_for(politician_id)
         if not metrics:
             raise HTTPException(404, "No metrics found for this politician")
 
-        # 2. Score them
         scoring = score_metrics(metrics)
 
-        # 3. Write to DB (snapshot + trend)
         snapshot = record_paragon_snapshot(politician_id, scoring)
 
         return {
             "politician_id": politician_id,
             "metrics": metrics,
             "overall_score": scoring["overall_score"],
-            "dimensions": scoring["dimensions"],             # full list
-            "dimensions_json": scoring["dimensions"],        # explicit field
+            "dimensions": scoring["dimensions"],
+            "dimensions_json": scoring["dimensions"],
             "snapshot": snapshot,
             "message": "PARAGON score recomputed successfully",
         }

@@ -3,27 +3,35 @@ import random
 import logging
 from typing import Any, Dict, List, Union
 
-# =====================================================================================
-# ARCHITECTURE IMPORTS: The "Bridge" to the Engine
-# =====================================================================================
-try:
-    # Attempt to load the real engine and metrics.
-    # If files are missing (e.g. during initial setup), we fall back to offline mode.
-    from utils.metrics_loader import load_metrics
-    from utils.paragon_engine import ParagonEngine
-    RAW_EVIDENCE = load_metrics()
-    print(f"✅ PARAGON System: Loaded evidence for {len(RAW_EVIDENCE)} profiles.")
-except ImportError:
-    print("⚠️ PARAGON System: Engine or Metrics not found. Running in Offline Mode.")
-    RAW_EVIDENCE = {}
-except Exception as e:
-    print(f"⚠️ PARAGON System: Error loading metrics: {e}")
-    RAW_EVIDENCE = {}
-
-# Lightweight runtime types
+# Type aliases
 VipProfile = Dict[str, Any]
 ParagonEntry = Dict[str, Any]
 
+# =====================================================================================
+# ARCHITECTURE IMPORTS: The "Bridge" to the New PARAGON Engine
+# =====================================================================================
+try:
+    # NEW engine paths
+    from etl.metric_loader import load_metrics_for
+    from etl.scoring_engine import score_metrics
+
+    print("✅ PARAGON System: New loader + scoring engine active.")
+    ENGINE_AVAILABLE = True
+
+    # Load all metric bundles for every politician ID (optional, can stay empty)
+    RAW_EVIDENCE: Dict[str, Any] = {}
+
+    # Example: preload for IDs that exist in the mock dataset
+    # We dynamically detect IDs in the profiles later at hydration time,
+    # so here we only set up the container.
+except ImportError:
+    print("⚠️ PARAGON System: Engine files not found. Running in Offline Mode.")
+    ENGINE_AVAILABLE = False
+    RAW_EVIDENCE = {}
+except Exception as e:
+    print(f"⚠️ PARAGON System: Error loading metrics: {e}")
+    ENGINE_AVAILABLE = False
+    RAW_EVIDENCE = {}
 
 # =====================================================================================
 # HELPER GENERATORS
@@ -1626,36 +1634,61 @@ A Doctorate-level political and business strategist with over 20 years of intern
 
 
 # =====================================================================================
-# 4. HYDRATION LOGIC (The "Bridge" to the Engine)
+# 4. HYDRATION LOGIC (The "Bridge" to the Engine) — OPTION A (ENGINE WINS)
 # =====================================================================================
 
-def hydrate_profiles_with_engine(profiles: List[VipProfile]):
+def hydrate_profiles_with_engine(profiles: List[VipProfile]) -> None:
     """
-    Iterates through all profiles. If a profile has real data in RAW_EVIDENCE,
-    it recalculates the score using ParagonEngine and overwrites the static data.
+    Iterate through all profiles and, where possible, overwrite static paragonAnalysis
+    with clinically computed results from the PARAGON engine.
+    
+    OPTION A (recommended for production):
+    - Static paragonAnalysis values act as fallback only.
+    - Whenever metric bundles exist for a given ID, engine scores take precedence.
     """
-    if not RAW_EVIDENCE:
-        return # Skip if no data loaded
+    if not ENGINE_AVAILABLE:
+        return  # Engine not available; keep static mock data
 
     count_updated = 0
+
     for profile in profiles:
         pid = profile.get("id")
-        if pid in RAW_EVIDENCE:
+        if not pid:
+            continue
+
+        metrics_bundle = None
+
+        # 1. Prefer preloaded RAW_EVIDENCE if present
+        if RAW_EVIDENCE.get(pid):
+            metrics_bundle = RAW_EVIDENCE[pid]
+        else:
+            # 2. Load evidence on demand via metric_loader
             try:
-                # 1. Instantiate Engine with specific evidence
-                engine = ParagonEngine(RAW_EVIDENCE[pid])
-                
-                # 2. Calculate clinical score
-                new_analysis = engine.calculate()
-                
-                # 3. Overwrite the static fallback
-                profile["paragonAnalysis"] = new_analysis
-                count_updated += 1
+                metrics_bundle = load_metrics_for(pid)
             except Exception as e:
-                print(f"⚠️ Error calculating score for {pid}: {e}")
-            
+                logging.warning("PARAGON: Error loading metrics for %s: %s", pid, e)
+                continue
+
+        if not metrics_bundle:
+            # No real data for this ID; keep static analysis
+            continue
+
+        # 3. Score metrics using scoring_engine
+        try:
+            new_analysis = score_metrics(metrics_bundle)
+        except Exception as e:
+            logging.warning("PARAGON: Error scoring metrics for %s: %s", pid, e)
+            continue
+
+        if not new_analysis:
+            continue
+
+        # 4. Overwrite static fallback paragonAnalysis with engine results
+        profile["paragonAnalysis"] = new_analysis
+        count_updated += 1
+
     if count_updated > 0:
-        print(f"🚀 PARAGON Engine: Clinically updated {count_updated} profiles with real data.")
+        logging.info("🚀 PARAGON Engine: Clinically updated %d profiles with real data.", count_updated)
 
 
 # =====================================================================================

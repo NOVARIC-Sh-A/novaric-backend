@@ -2,6 +2,9 @@ from pydantic import BaseModel, Field
 from typing import List, Optional
 
 
+# ============================================================
+# EXPERIENCE MODEL
+# ============================================================
 class ExperienceItem(BaseModel):
     role: Optional[str]
     organization: Optional[str]
@@ -10,6 +13,9 @@ class ExperienceItem(BaseModel):
     description: Optional[str]
 
 
+# ============================================================
+# EDUCATION MODEL
+# ============================================================
 class EducationItem(BaseModel):
     institution: Optional[str]
     degree: Optional[str]
@@ -18,6 +24,9 @@ class EducationItem(BaseModel):
     end_year: Optional[int]
 
 
+# ============================================================
+# CHECKLIST / AI IMPROVEMENT MODEL
+# ============================================================
 class ChecklistItem(BaseModel):
     id: str
     category: str
@@ -27,24 +36,42 @@ class ChecklistItem(BaseModel):
     priority: str
 
 
+# ============================================================
+# VIP PROFILE RESPONSE (MAIN MODEL)
+# ============================================================
 class VipProfileResponse(BaseModel):
     """
-    Final enriched VIP profile schema used by GET /profile/{profile_id}.
-    This schema consolidates all fields referenced in the DB + enrichment layer.
+    Final enriched VIP profile schema.
+
+    Used by:
+        GET /api/profile/{profile_id}
+
+    Includes:
+        - User identity
+        - Social/Professional metadata
+        - Education & Experience
+        - Political attributes (optional)
+        - AI enrichment output (checklist)
     """
 
-    # Core identity
+    # ----------------------------------------
+    # CORE IDENTITY
+    # ----------------------------------------
     id: str
     name: str
     gender: Optional[str]
     date_of_birth: Optional[str]
     nationality: Optional[str]
 
-    # Profile content
+    # ----------------------------------------
+    # PROFILE CONTENT
+    # ----------------------------------------
     bio: Optional[str]
-    headline: Optional[str]  # short tagline, e.g., "Minister of Finance"
+    headline: Optional[str]   # e.g. "Minister of Finance"
 
-    # Contact / URLs
+    # ----------------------------------------
+    # CONTACT / URL FIELDS
+    # ----------------------------------------
     linkedin_url: Optional[str]
     twitter_url: Optional[str]
     facebook_url: Optional[str]
@@ -52,27 +79,37 @@ class VipProfileResponse(BaseModel):
     portfolio_url: Optional[str]
     official_website: Optional[str]
 
-    # Skills & Attributes
+    # ----------------------------------------
+    # SKILLS & ATTRIBUTES
+    # ----------------------------------------
     skills: Optional[List[str]] = Field(default_factory=list)
     languages: Optional[List[str]] = Field(default_factory=list)
 
-    # Experience & Education
+    # ----------------------------------------
+    # EXPERIENCE & EDUCATION
+    # ----------------------------------------
     experience: Optional[List[ExperienceItem]] = Field(default_factory=list)
     education: Optional[List[EducationItem]] = Field(default_factory=list)
 
-    # Political / Public-sector fields
+    # ----------------------------------------
+    # POLITICAL / PUBLIC-SECTOR METADATA
+    # ----------------------------------------
     current_position: Optional[str]
     political_party: Optional[str]
     region: Optional[str]
     is_active_politician: Optional[bool]
 
-    # Metadata
+    # ----------------------------------------
+    # SYSTEM METADATA
+    # ----------------------------------------
     created_at: Optional[str]
     updated_at: Optional[str]
     profile_image_url: Optional[str]
     verified: Optional[bool] = False
 
-    # AI enrichment output (new)
+    # ----------------------------------------
+    # AI ENRICHMENT OUTPUT
+    # ----------------------------------------
     improvement_checklist: Optional[List[ChecklistItem]] = Field(
         default_factory=list,
         description="AI-generated improvement recommendations for the profile."

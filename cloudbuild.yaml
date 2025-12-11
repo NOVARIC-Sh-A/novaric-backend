@@ -8,8 +8,26 @@ substitutions:
   _REGION: "europe-west1"
   _AR_REPO: "cloud-run-source-deploy"
   _IMAGE_NAME: "novaric-backend"
+  _TAG: "manual"   # fallback tag; overwritten when Cloud Build sets $SHORT_SHA
 
 steps:
+
+  # ============================================================
+  # 0) Normalize TAG (SHORT_SHA → TAG)
+  # ============================================================
+  - name: "alpine"
+    id: "Normalize TAG"
+    entrypoint: sh
+    args:
+      - -c
+      - |
+        if [ -n "$SHORT_SHA" ]; then
+          echo "Using SHORT_SHA: $SHORT_SHA"
+          echo "$SHORT_SHA" > /workspace/TAG
+        else
+          echo "SHORT_SHA empty → using fallback tag: ${_TAG}"
+          echo "${_TAG}" > /workspace/TAG
+        fi
 
   # ============================================================
   # 1) Build Docker Image
@@ -22,7 +40,7 @@ steps:
         "--cache-from",
         "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_IMAGE_NAME}:latest",
         "-t",
-        "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_IMAGE_NAME}:${SHORT_SHA:-manual}",
+        "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_IMAGE_NAME}:$(cat /workspace/TAG)",
         "-t",
         "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_IMAGE_NAME}:latest",
         "."
@@ -32,17 +50,23 @@ steps:
   # 2) Push Images
   # ============================================================
   - name: gcr.io/cloud-builders/docker
-    id: "Push SHA or manual"
+    id: "Push TAG"
     args:
-      ["push", "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_IMAGE_NAME}:${SHORT_SHA:-manual}"]
+      [
+        "push",
+        "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_IMAGE_NAME}:$(cat /workspace/TAG)"
+      ]
 
   - name: gcr.io/cloud-builders/docker
     id: "Push Latest"
     args:
-      ["push", "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_IMAGE_NAME}:latest"]
+      [
+        "push",
+        "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_IMAGE_NAME}:latest"
+      ]
 
   # ============================================================
-  # 3) Deploy to Cloud Run with Secret Manager
+  # 3) Deploy to Cloud Run
   # ============================================================
   - name: gcr.io/google.com/cloudsdktool/cloud-sdk
     id: "Deploy to Cloud Run"
@@ -50,7 +74,7 @@ steps:
     args:
       [
         "run", "deploy", "${_SERVICE_NAME}",
-        "--image=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_IMAGE_NAME}:${SHORT_SHA:-manual}",
+        "--image=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_IMAGE_NAME}:$(cat /workspace/TAG)",
         "--region=${_REGION}",
         "--platform=managed",
         "--allow-unauthenticated",
@@ -65,5 +89,4 @@ steps:
       ]
 
 images:
-  - "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_IMAGE_NAME}:${SHORT_SHA:-manual}"
-  - "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_IMAGE_NAME}:latest"
+  - "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/${_IMAGE_NAME}"

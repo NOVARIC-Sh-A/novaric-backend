@@ -1,43 +1,48 @@
-import os
-import sys
+# tests/conftest.py
+
 import pytest
 from fastapi.testclient import TestClient
 from unittest.mock import patch
 
-# ----------------------------------------------------------------------
-# FIX: Ensure project root is on PYTHONPATH
-# ----------------------------------------------------------------------
-ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-if ROOT_DIR not in sys.path:
-    sys.path.insert(0, ROOT_DIR)
-
-from main import app  # now import works
+# Import AFTER mocks are defined
+import main  
 
 
-@pytest.fixture
+@pytest.fixture(scope="session")
 def client():
-    return TestClient(app)
+    return TestClient(main.app)
 
 
-# ----------------------------------------------------------------------
-# Disable RSS parsing during tests
-# ----------------------------------------------------------------------
+# ----------------------------------------------------------
+# Disable RSS network calls
+# ----------------------------------------------------------
 @pytest.fixture(autouse=True)
 def mock_feedparser():
     with patch("feedparser.parse") as mock:
-        mock.return_value = type(
-            "Feed",
-            (),
-            {"entries": [], "bozo": False, "status": 200}
-        )
+        mock.return_value = type("Feed", (), {
+            "entries": [],
+            "bozo": False,
+            "status": 200
+        })
         yield
 
 
-# ----------------------------------------------------------------------
-# Disable Supabase networking
-# ----------------------------------------------------------------------
+# ----------------------------------------------------------
+# Disable Supabase for ALL tests
+# ----------------------------------------------------------
 @pytest.fixture(autouse=True)
 def mock_supabase():
-    with patch("utils.supabase_client._get") as get_mock:
-        get_mock.return_value = []
+    with patch("utils.supabase_client._get") as mock:
+        mock.return_value = []
+        yield
+
+
+# ----------------------------------------------------------
+# Disable Gemini (media & social scrapers)
+# ----------------------------------------------------------
+@pytest.fixture(autouse=True)
+def mock_gemini():
+    with patch("google.generativeai.GenerativeModel") as mock_model:
+        instance = mock_model.return_value
+        instance.generate_content.return_value = type("Obj", (), {"text": '{"influence_boost": 0}'})
         yield

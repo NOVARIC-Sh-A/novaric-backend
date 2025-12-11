@@ -56,18 +56,22 @@ steps:
         "--allow-unauthenticated",
         "--port=8080",
 
-        # Performance settings
+        # ===== Performance settings =====
         "--cpu=1",
-        "--memory=512Mi",
+        "--memory=1Gi",
         "--timeout=300",
         "--max-instances=20",
+        "--min-instances=0",
 
-        # Environment Variables
+        # ===== Environment Variables =====
         "--set-env-vars=USE_LIVE_DB=True",
 
-        # Secret Injection (RECOMMENDED)
-        "--set-secrets=SUPABASE_URL=supabase-url:latest",
-        "--set-secrets=SUPABASE_SERVICE_ROLE_KEY=supabase-service-role:latest"
+        # ===== Secret Manager injection =====
+        "--set-secrets=SUPABASE_URL=SUPABASE_URL:latest",
+        "--set-secrets=SUPABASE_KEY=SUPABASE_KEY:latest",
+        "--set-secrets=SUPABASE_SERVICE_ROLE_KEY=SUPABASE_SERVICE_ROLE_KEY:latest",
+        "--set-secrets=SERPAPI_KEY=SERPAPI_KEY:latest",
+        "--set-secrets=GOOGLE_API_KEY=GOOGLE_API_KEY:latest"
       ]
 
 images:

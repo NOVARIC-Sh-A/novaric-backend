@@ -10,7 +10,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Install requirements into /install so runtime image stays clean
+# Install all Python dependencies into /install
 COPY requirements.txt requirements.txt
 
 RUN pip install --prefix=/install --no-cache-dir -r requirements.txt
@@ -22,26 +22,28 @@ RUN pip install --prefix=/install --no-cache-dir -r requirements.txt
 # ============================
 FROM python:3.11-slim
 
-ENV PYTHONUNBUFFERED=1
+# Cloud Run expects the app to listen on $PORT
 ENV PORT=8080
-ENV PYTHONPATH="/app"   
+ENV PYTHONUNBUFFERED=1
 
-# Ensures imports like "from utils.x import y" work
+# Ensures absolute imports work (e.g., "import utils.x")
+ENV PYTHONPATH="/app"
 
+# Create non-root user (Cloud Run best practice)
 RUN useradd -m appuser
 USER appuser
 
 WORKDIR /app
 
-# Copy installed site-packages from builder
+# Add site-packages from builder stage
 COPY --from=builder /install /home/appuser/.local/
 ENV PATH="/home/appuser/.local/bin:${PATH}"
 
-# Copy entire backend project
+# Copy the entire backend source code
 COPY --chown=appuser:appuser . /app
 
-# Expose FastAPI port
+# Expose the port FastAPI will run on
 EXPOSE 8080
 
-# Start FastAPI with Uvicorn (Cloud Run safe)
-CMD exec uvicorn main:app --host 0.0.0.0 --port ${PORT}
+# Start application via Uvicorn
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]

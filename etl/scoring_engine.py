@@ -1,157 +1,166 @@
-# etl/scoring_engine.py
+# scoring_engine.py
 
 from typing import Dict, Any, List
 
-from etl.politician_map import (
-    POLITICIAN_ID_MAP_NORMALIZED,
-    POLITICIAN_META_NORMALIZED,
-    normalize_name,
-)
-
+# ------------------------------------------------------------
+# Normalization ranges for metrics (min, max)
+# ------------------------------------------------------------
+RANGES = {
+    "scandals_flagged": (0, 10),            # inverse
+    "wealth_declaration_issues": (0, 5),    # inverse
+    "public_projects_completed": (0, 50),
+    "parliamentary_attendance": (0, 100),
+    "international_meetings": (0, 30),
+    "party_control_index": (0, 20),
+    "media_mentions_monthly": (0, 2000),
+    "legislative_initiatives": (0, 20),
+    "independence_index": (0, 10),
+    "sentiment_score": (-1, 1),
+    "social_influence": (0, 10),
+    # New event-based momentum range (-10 to +10)
+    "momentum_raw": (-10, 10),
+}
 
 # ------------------------------------------------------------
-# Helper: scale a value to 0–100 with soft floors
+# Dimension weights (unchanged for existing 7 dimensions)
 # ------------------------------------------------------------
-def _scale(value: float, max_value: float, floor: int = 40, ceil: int = 95) -> int:
+WEIGHTS = {
+    "integrity": {
+        "scandals_flagged": 0.60,
+        "wealth_declaration_issues": 0.40,
+    },
+    "governance": {
+        "public_projects_completed": 0.50,
+        "parliamentary_attendance": 0.30,
+        "international_meetings": 0.20,
+    },
+    "influence": {
+        "party_control_index": 0.40,
+        "media_mentions_monthly": 0.40,
+        "social_influence": 0.20,
+    },
+    "professionalism": {
+        "legislative_initiatives": 0.70,
+        "independence_index": 0.30,
+    },
+}
+
+# =====================================================================
+# NORMALIZATION FUNCTION
+# =====================================================================
+def _norm(key: str, value: float, inverse: bool = False) -> float:
+    min_v, max_v = RANGES.get(key, (0, 1))
+    clamped = max(min_v, min(value, max_v))
+
+    span = max_v - min_v
+    score = ((clamped - min_v) / span) * 100 if span > 0 else 0
+
+    return (100 - score) if inverse else score
+
+
+# =====================================================================
+# CORE SCORING ENGINE
+# =====================================================================
+def score_metrics(metrics: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Normalizes a value into a score range [floor, ceil].
-    Used for visibility, reach, and crisis stability.
+    Converts unified metrics into:
+        - 8 PARAGON dimensions
+        - overall score (0–100)
     """
-    if max_value <= 0:
-        return floor
 
-    ratio = value / max_value
-    raw = floor + ratio * (ceil - floor)
-    score = int(raw)
+    # ------------------------------
+    # 1. Integrity & Transparency
+    # ------------------------------
+    s_scandals = _norm("scandals_flagged", metrics.get("scandals_flagged", 0), inverse=True)
+    s_wealth = _norm("wealth_declaration_issues", metrics.get("wealth_declaration_issues", 0), inverse=True)
 
-    return max(0, min(100, score))
+    integrity_score = (
+        s_scandals * WEIGHTS["integrity"]["scandals_flagged"] +
+        s_wealth * WEIGHTS["integrity"]["wealth_declaration_issues"]
+    )
 
+    # ------------------------------
+    # 2. Governance Strength
+    # ------------------------------
+    s_projects = _norm("public_projects_completed", metrics.get("public_projects_completed", 0))
+    s_attendance = _norm("parliamentary_attendance", metrics.get("parliamentary_attendance", 0))
+    s_intl = _norm("international_meetings", metrics.get("international_meetings", 0))
 
-# ------------------------------------------------------------
-# Compute sentiment score
-# ------------------------------------------------------------
-def _sentiment_score(pos: int, neg: int, mentions: int) -> int:
-    """
-    Convert sentiment distribution into 0–100.
-    balance = (pos - neg) / mentions → [-1, +1]
-    mapped into → [0, 100]
-    """
-    if mentions <= 0:
-        return 50  # neutral baseline
+    governance_score = (
+        s_projects * WEIGHTS["governance"]["public_projects_completed"] +
+        s_attendance * WEIGHTS["governance"]["parliamentary_attendance"] +
+        s_intl * WEIGHTS["governance"]["international_meetings"]
+    )
 
-    balance = (pos - neg) / max(1, mentions)
-    normalized = (balance + 1) / 2  # maps [-1..1] ➞ [0..1]
-    score = int(normalized * 100)
+    # ------------------------------
+    # 3. Influence & Assertiveness
+    # ------------------------------
+    s_party = _norm("party_control_index", metrics.get("party_control_index", 0))
+    s_media = _norm("media_mentions_monthly", metrics.get("media_mentions_monthly", 0))
+    s_social = _norm("social_influence", metrics.get("social_influence", 0))
 
-    return max(0, min(100, score))
+    influence_score = (
+        s_party * WEIGHTS["influence"]["party_control_index"] +
+        s_media * WEIGHTS["influence"]["media_mentions_monthly"] +
+        s_social * WEIGHTS["influence"]["social_influence"]
+    )
 
+    # ------------------------------
+    # 4. Professionalism
+    # ------------------------------
+    s_leg = _norm("legislative_initiatives", metrics.get("legislative_initiatives", 0))
+    s_ind = _norm("independence_index", metrics.get("independence_index", 0))
 
-# ------------------------------------------------------------
-# Build PARAGON scores using normalized politician keys
-# ------------------------------------------------------------
-def build_paragon_scores_from_signals(
-    signals: Dict[str, Dict[str, Any]]
-) -> List[Dict[str, Any]]:
+    professionalism_score = (
+        s_leg * WEIGHTS["professionalism"]["legislative_initiatives"] +
+        s_ind * WEIGHTS["professionalism"]["independence_index"]
+    )
 
-    if not signals:
-        return []
+    # ------------------------------
+    # 5. Representation (derived)
+    # ------------------------------
+    representation_score = (influence_score + professionalism_score) / 2
 
-    # Compute global max values for normalization
-    max_mentions = max(sig.get("mentions", 0) for sig in signals.values()) or 1
-    max_sources = 1
+    # ------------------------------
+    # 6. Cohesion (derived)
+    # ------------------------------
+    cohesion_score = metrics.get("party_control_index", 5) * 10
+    cohesion_score = max(0, min(100, cohesion_score))
 
-    # Estimate diversity of media sources
-    for sig in signals.values():
-        hits = sig.get("media_hits", [])
-        sources = {h.get("source_url") for h in hits if h.get("source_url")}
-        max_sources = max(max_sources, len(sources))
+    # ------------------------------
+    # 7. Narrative / Communication (derived)
+    # ------------------------------
+    narrative_score = _norm("media_mentions_monthly", metrics.get("media_mentions_monthly", 0))
 
-    results = []
+    # ------------------------------
+    # 8. NEW — Momentum & Resilience
+    # ------------------------------
+    pos = metrics.get("media_positive_events", 0)
+    neg = metrics.get("media_negative_events", 0)
 
-    # ------------------------------------------------------------
-    # Iterate through normalized politician keys
-    # ------------------------------------------------------------
-    for normalized_name, sig in signals.items():
+    momentum_raw = pos - neg
+    s_momentum = _norm("momentum_raw", momentum_raw)
 
-        # Must exist in master metadata — guaranteed by normalized transformer
-        meta = POLITICIAN_META_NORMALIZED.get(normalized_name)
-        if not meta:
-            print(f"[Scoring] WARNING: Unknown normalized name '{normalized_name}'. Skipping.")
-            continue
+    # ------------------------------
+    # Pack dimensions
+    # ------------------------------
+    dimensions = [
+        {"dimension": "Accountability & Transparency", "score": int(integrity_score)},
+        {"dimension": "Governance & Institutional Strength", "score": int(governance_score)},
+        {"dimension": "Assertiveness & Influence", "score": int(influence_score)},
+        {"dimension": "Policy Engagement & Expertise", "score": int(professionalism_score)},
+        {"dimension": "Representation & Responsiveness", "score": int(representation_score)},
+        {"dimension": "Organizational & Party Cohesion", "score": int(cohesion_score)},
+        {"dimension": "Narrative & Communication", "score": int(narrative_score)},
+        {"dimension": "Momentum & Resilience", "score": int(s_momentum)},   # NEW
+    ]
 
-        politician_id = meta["id"]
-        full_name = meta["full_name"]
+    # ------------------------------
+    # Final overall score (now 8 dimensions)
+    # ------------------------------
+    overall = int(sum(d["score"] for d in dimensions) / len(dimensions))
 
-        mentions = sig.get("mentions", 0)
-        pos = sig.get("positive", 0)
-        neg = sig.get("negative", 0)
-        neu = sig.get("neutral", 0)
-        hits = sig.get("media_hits", [])
-
-        sources = {h.get("source_url") for h in hits if h.get("source_url")}
-        num_sources = len(sources)
-
-        # --------------------------------------------------------
-        # PARAGON core dimensions
-        # --------------------------------------------------------
-
-        visibility_score = _scale(mentions, max_mentions)
-        reach_score = _scale(num_sources, max_sources)
-        sentiment_score = _sentiment_score(pos, neg, mentions)
-
-        # Crisis stability: presence despite negative coverage
-        crisis_index = (mentions - neg) / max(1, mentions)
-        crisis_score = _scale(crisis_index, 1.0)
-
-        dimension_scores = {
-            "Narrativa & Komunikimi": {
-                "score": int((visibility_score + sentiment_score) / 2),
-                "peerAverage": 60,
-                "commentary": (
-                    "Vlerësim i bazuar në prezencën mediatike dhe perceptimin emocional "
-                    "të formuar nga raportimet."
-                ),
-            },
-            "Shtrirja Mediatike": {
-                "score": reach_score,
-                "peerAverage": 60,
-                "commentary": (
-                    "Sa i shpërndarë është aktori politik në platformat kryesore mediatike."
-                ),
-            },
-            "Perceptimi Publik": {
-                "score": sentiment_score,
-                "peerAverage": 60,
-                "commentary": (
-                    "Balanca ndërmjet lajmeve pozitive, negative dhe neutrale."
-                ),
-            },
-            "Qëndrueshmëria në Kriza": {
-                "score": crisis_score,
-                "peerAverage": 60,
-                "commentary": (
-                    "Qëndrueshmëria e figurës politike ndaj kritikave dhe "
-                    "situatave të tensionuara."
-                ),
-            },
-        }
-
-        overall = int(
-            sum(d["score"] for d in dimension_scores.values()) / len(dimension_scores)
-        )
-
-        # --------------------------------------------------------
-        # Final Supabase-ready record
-        # --------------------------------------------------------
-        results.append(
-            {
-                "politician_id": politician_id,     # correct primary key
-                "overall_score": overall,
-                "dimension_scores": dimension_scores,
-                "signals_raw": sig,                 # optional — keeps full trace
-                "last_updated": "now()",
-            }
-        )
-
-    print(f"[Scoring] Generated PARAGON scores for {len(results)} profiles")
-    return results
+    return {
+        "overall_score": overall,
+        "dimensions": dimensions,
+    }

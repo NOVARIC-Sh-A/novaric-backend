@@ -1,77 +1,93 @@
-# paragon_api.py
+"""
+paragon_api.py
+
+PARAGON® Analytics API:
+- Latest scores
+- Trends
+- Risers / Fallers
+- Momentum
+- Dashboard Aggregator
+- Real-time recomputation (NEW)
+"""
 
 from fastapi import APIRouter, HTTPException
 from typing import List, Dict, Any
+
 from utils.supabase_client import _get
+from etl.metric_loader import load_metrics_for
+from etl.scoring_engine import score_metrics
+from etl.trend_engine import record_paragon_snapshot
 
 router = APIRouter(
     prefix="/api/paragon",
     tags=["PARAGON Analytics"]
 )
 
-# -------------------------------------------------------------------
-# Safe Supabase getter
-# -------------------------------------------------------------------
-def fetch_safe(table: str, params: Dict[str, Any]) -> List[Dict[str, Any]]:
+
+# =====================================================================
+# Safe getter wrapper
+# =====================================================================
+def fetch_safe(table: str, params: Dict[str, Any]):
     try:
         return _get(table, params)
     except Exception as e:
-        print(f"[PARAGON API] Supabase fetch failed for {table}: {e}")
+        print(f"[paragon_api] Supabase fetch failed ({table}): {e}")
         return []
 
 
-# -------------------------------------------------------------------
-# INTERNAL: compute deltas for momentum
-# -------------------------------------------------------------------
-def compute_deltas(history: List[Dict[str, Any]]) -> Dict[int, Dict[str, Any]]:
-    grouped: Dict[int, List[Dict[str, Any]]] = {}
+# =====================================================================
+# Helper: Normalize DB row → frontend-ready format
+# =====================================================================
+def _normalize_paragon_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Ensures all endpoints return consistent shape:
 
-    # Group by politician_id
-    for row in history:
-        pid = row.get("politician_id")
-        if not pid:
-            continue
-        grouped.setdefault(pid, []).append(row)
+    {
+        "politician_id": int,
+        "overall_score": int,
+        "calculated_at": "...",
+        "dimensions": [...],          # always list of {dimension, score}
+        "dimensions_json": [...],     # raw from DB for advanced consumers
+        "politicians": {...}          # metadata
+    }
+    """
 
-    deltas: Dict[int, Dict[str, Any]] = {}
+    dims = row.get("dimensions_json") or []
 
-    for pid, rows in grouped.items():
-        if len(rows) < 2:
-            continue
-
-        rows_sorted = sorted(rows, key=lambda r: r["calculated_at"], reverse=True)
-
-        new_score = rows_sorted[0]["overall_score"]
-        prev_score = rows_sorted[1]["overall_score"]
-        delta = new_score - prev_score
-
-        deltas[pid] = {
-            "politician_id": pid,
-            "name": rows_sorted[0].get("politicians", {}).get("name"),
-            "new_score": new_score,
-            "previous_score": prev_score,
-            "delta": delta,
+    # backward-compatibility for old frontend components
+    dimensions = [
+        {
+            "dimension": d.get("dimension"),
+            "score": int(d.get("score", 0)),
         }
+        for d in dims
+    ]
 
-    return deltas
+    return {
+        **row,
+        "dimensions": dimensions,
+        "dimensions_json": dims,
+    }
 
 
-# -------------------------------------------------------------------
-# 1) LATEST LIVE SCORES
-# -------------------------------------------------------------------
+# =====================================================================
+# 1. Latest Live Scores
+# =====================================================================
 @router.get("/latest")
 def get_latest_scores():
     data = fetch_safe(
         "paragon_scores",
-        {
-            "select": "*,politicians(*)",
-            "order": "overall_score.desc"
-        }
+        {"select": "*,politicians(*)", "order": "overall_score.desc"}
     )
-    return {"count": len(data), "results": data}
+
+    normalized = [_normalize_paragon_row(x) for x in data]
+
+    return {
+        "count": len(normalized),
+        "results": normalized
+    }
 
 
-# Single politician latest score
 @router.get("/latest/{politician_id}")
 def get_latest_score_for(politician_id: int):
     data = fetch_safe(
@@ -82,14 +98,16 @@ def get_latest_score_for(politician_id: int):
             "limit": 1
         }
     )
+
     if not data:
-        raise HTTPException(status_code=404, detail="Politician score not found")
-    return data[0]
+        raise HTTPException(404, "Politician score not found")
+
+    return _normalize_paragon_row(data[0])
 
 
-# -------------------------------------------------------------------
-# 2) TREND HISTORY (global)
-# -------------------------------------------------------------------
+# =====================================================================
+# 2. Global Trend History
+# =====================================================================
 @router.get("/trends/latest")
 def get_latest_trends():
     data = fetch_safe(
@@ -100,10 +118,12 @@ def get_latest_trends():
             "limit": 500
         }
     )
-    return {"count": len(data), "results": data}
+
+    normalized = [_normalize_paragon_row(x) for x in data]
+
+    return {"count": len(normalized), "results": normalized}
 
 
-# Trend history for a specific politician
 @router.get("/trends/history/{politician_id}")
 def get_trend_history(politician_id: int):
     data = fetch_safe(
@@ -115,126 +135,138 @@ def get_trend_history(politician_id: int):
             "limit": 50
         }
     )
-    return {"count": len(data), "results": data}
+
+    return {
+        "count": len(data),
+        "results": [_normalize_paragon_row(x) for x in data],
+    }
 
 
-# -------------------------------------------------------------------
-# 3) TOP RISERS
-# -------------------------------------------------------------------
+# =====================================================================
+# 3. Risers / Fallers (same delta logic)
+# =====================================================================
+def compute_deltas(history: List[Dict[str, Any]]):
+    grouped = {}
+
+    for row in history:
+        pid = row.get("politician_id")
+        if not pid:
+            continue
+        grouped.setdefault(pid, []).append(row)
+
+    deltas = {}
+
+    for pid, rows in grouped.items():
+        if len(rows) < 2:
+            continue
+
+        rows_sorted = sorted(rows, key=lambda r: r["calculated_at"], reverse=True)
+
+        new_score = rows_sorted[0]["overall_score"]
+        prev_score = rows_sorted[1]["overall_score"]
+
+        deltas[pid] = {
+            "politician_id": pid,
+            "name": rows_sorted[0].get("politicians", {}).get("name"),
+            "new_score": new_score,
+            "previous_score": prev_score,
+            "delta": new_score - prev_score,
+        }
+
+    return deltas
+
+
 @router.get("/trends/top-risers")
 def get_top_risers(limit: int = 10):
     history = fetch_safe(
         "paragon_trends",
-        {
-            "select": "*,politicians(*)",
-            "order": "calculated_at.desc",
-            "limit": 200
-        }
+        {"select": "*,politicians(*)", "order": "calculated_at.desc", "limit": 300}
     )
 
     deltas = compute_deltas(history)
 
-    risers = [d for d in deltas.values() if d["delta"] > 0]
-    sorted_risers = sorted(risers, key=lambda x: x["delta"], reverse=True)
+    risers = sorted(
+        [d for d in deltas.values() if d["delta"] > 0],
+        key=lambda x: x["delta"],
+        reverse=True
+    )
 
-    return {"count": len(sorted_risers), "results": sorted_risers[:limit]}
+    return {"count": len(risers), "results": risers[:limit]}
 
 
-# -------------------------------------------------------------------
-# 4) TOP FALLERS
-# -------------------------------------------------------------------
 @router.get("/trends/top-fallers")
 def get_top_fallers(limit: int = 10):
     history = fetch_safe(
         "paragon_trends",
-        {
-            "select": "*,politicians(*)",
-            "order": "calculated_at.desc",
-            "limit": 200
-        }
+        {"select": "*,politicians(*)", "order": "calculated_at.desc", "limit": 300}
     )
 
     deltas = compute_deltas(history)
 
-    fallers = [d for d in deltas.values() if d["delta"] < 0]
-    sorted_fallers = sorted(fallers, key=lambda x: x["delta"])
+    fallers = sorted(
+        [d for d in deltas.values() if d["delta"] < 0],
+        key=lambda x: x["delta"]
+    )
 
-    return {"count": len(sorted_fallers), "results": sorted_fallers[:limit]}
+    return {"count": len(fallers), "results": fallers[:limit]}
 
 
-# -------------------------------------------------------------------
-# 5) MOMENTUM — per politician
-# -------------------------------------------------------------------
+# =====================================================================
+# 4. Momentum
+# =====================================================================
 @router.get("/trends/momentum/{politician_id}")
 def get_momentum(politician_id: int):
-    history = fetch_safe(
+    rows = fetch_safe(
         "paragon_trends",
         {
             "select": "*,politicians(*)",
             "politician_id": f"eq.{politician_id}",
             "order": "calculated_at.desc",
-            "limit": 2
+            "limit": 2,
         }
     )
 
-    if len(history) < 2:
+    if len(rows) < 2:
         return {"message": "Not enough data", "delta": 0}
 
-    new_score = history[0]["overall_score"]
-    prev_score = history[1]["overall_score"]
-    delta = new_score - prev_score
+    new_score = rows[0]["overall_score"]
+    prev_score = rows[1]["overall_score"]
 
     return {
         "politician_id": politician_id,
-        "name": history[0].get("politicians", {}).get("name"),
+        "name": rows[0].get("politicians", {}).get("name"),
         "new_score": new_score,
         "previous_score": prev_score,
-        "delta": delta
+        "delta": new_score - prev_score,
     }
 
-# -------------------------------------------------------------------
-# 6) DASHBOARD AGGREGATOR (one-call endpoint)
-# -------------------------------------------------------------------
+
+# =====================================================================
+# 5. Dashboard Aggregator
+# =====================================================================
 @router.get("/dashboard")
 def get_paragon_dashboard(limit: int = 10):
-    """
-    Returns a full PARAGON dashboard dataset in one API call:
-      - latestScores: sorted by overall_score
-      - topRisers: top Δ positive
-      - topFallers: top Δ negative
-      - recentTrends: last 500 entries
-    """
 
-    # --- Latest Live Scores ---
     latest_scores = fetch_safe(
         "paragon_scores",
-        {
-            "select": "*,politicians(*)",
-            "order": "overall_score.desc"
-        }
+        {"select": "*,politicians(*)", "order": "overall_score.desc"}
     )
+    latest_scores = [_normalize_paragon_row(x) for x in latest_scores]
 
-    # --- Trend History (global) ---
     trend_history = fetch_safe(
         "paragon_trends",
-        {
-            "select": "*,politicians(*)",
-            "order": "calculated_at.desc",
-            "limit": 500
-        }
+        {"select": "*,politicians(*)", "order": "calculated_at.desc", "limit": 500}
     )
+    trend_history_norm = [_normalize_paragon_row(x) for x in trend_history]
 
-    # --- Compute Deltas ---
     deltas = compute_deltas(trend_history)
 
-    # Risers = Δ > 0
     top_risers = sorted(
         [d for d in deltas.values() if d["delta"] > 0],
         key=lambda x: x["delta"],
         reverse=True
     )[:limit]
 
-    # Fallers = Δ < 0
     top_fallers = sorted(
         [d for d in deltas.values() if d["delta"] < 0],
         key=lambda x: x["delta"]
@@ -244,5 +276,41 @@ def get_paragon_dashboard(limit: int = 10):
         "latestScores": latest_scores,
         "topRisers": top_risers,
         "topFallers": top_fallers,
-        "recentTrends": trend_history
+        "recentTrends": trend_history_norm,
     }
+
+
+# =====================================================================
+# 6. Real-time recomputation
+# =====================================================================
+@router.post("/recompute/{politician_id}")
+def recompute_paragon_score(politician_id: int):
+
+    try:
+        # 1. Load all raw metrics
+        metrics = load_metrics_for(politician_id)
+        if not metrics:
+            raise HTTPException(404, "No metrics found for this politician")
+
+        # 2. Score them
+        scoring = score_metrics(metrics)
+
+        # 3. Write to DB (snapshot + trend)
+        snapshot = record_paragon_snapshot(politician_id, scoring)
+
+        return {
+            "politician_id": politician_id,
+            "metrics": metrics,
+            "overall_score": scoring["overall_score"],
+            "dimensions": scoring["dimensions"],             # full list
+            "dimensions_json": scoring["dimensions"],        # explicit field
+            "snapshot": snapshot,
+            "message": "PARAGON score recomputed successfully",
+        }
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        print(f"[paragon_api] recompute failed: {e}")
+        raise HTTPException(500, "PARAGON recomputation failed")

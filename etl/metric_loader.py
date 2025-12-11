@@ -19,6 +19,15 @@ from utils.supabase_client import _get
 from etl.media_scraper import scrape_media_signals
 from etl.social_scraper import scrape_social_signals
 
+# ------------------------------------------------------------
+# TEST MODE — disables live scraping during pytest
+# ------------------------------------------------------------
+import os
+TEST_MODE = os.getenv("TEST_MODE", "false").lower() == "true"
+
+if TEST_MODE:
+    print("⚠ metric_loader: TEST MODE active — media & social scrapers disabled.")
+    
 
 # =====================================================================
 # 1. Base structured metrics from Supabase
@@ -29,6 +38,22 @@ def _load_base_metrics(politician_id: int) -> Dict[str, Any]:
 
     If no record exists, returns safe defaults.
     """
+
+    if TEST_MODE:
+        return {
+            "scandals_flagged": 0,
+            "wealth_declaration_issues": 0,
+            "public_projects_completed": 0,
+            "parliamentary_attendance": 0,
+            "international_meetings": 0,
+            "party_control_index": 0,
+            "media_mentions_monthly": 0,
+            "legislative_initiatives": 0,
+            "independence_index": 0,
+            "media_positive_events": 0,
+            "media_negative_events": 0,
+        }
+
     try:
         rows = _get(
             "paragon_metrics",
@@ -53,7 +78,6 @@ def _load_base_metrics(politician_id: int) -> Dict[str, Any]:
         "media_mentions_monthly": base.get("media_mentions_monthly", 0),
         "legislative_initiatives": base.get("legislative_initiatives", 0),
         "independence_index": base.get("independence_index", 0),
-        # New optional event metrics (if you later want to use them in scoring):
         "media_positive_events": base.get("media_positive_events", 0),
         "media_negative_events": base.get("media_negative_events", 0),
     }
@@ -80,7 +104,6 @@ def load_metrics_for(politician_id: int) -> Dict[str, Any]:
             independence_index: int,
             sentiment_score: float,
             social_influence: float,
-            # plus optional:
             media_positive_events: int,
             media_negative_events: int
         }
@@ -91,23 +114,26 @@ def load_metrics_for(politician_id: int) -> Dict[str, Any]:
     # ------------------------------------------------------
     metrics: Dict[str, Any] = _load_base_metrics(politician_id)
 
+    # Shortcut exit for tests — bypass all scrapers
+    if TEST_MODE:
+        metrics["sentiment_score"] = 0.0
+        metrics["social_influence"] = 0.0
+        return metrics
+
     # ------------------------------------------------------
     # 2) HYBRID MEDIA SIGNALS (RSS + SERPAPI + Gemini)
     # ------------------------------------------------------
     try:
         media = scrape_media_signals(politician_id)
 
-        # Mentions & scandals
         metrics["media_mentions_monthly"] += media.get("mentions", 0)
         metrics["scandals_flagged"] += media.get("scandals_flagged", 0)
 
-        # Attendance proxy via events (can be tuned later)
         metrics["parliamentary_attendance"] += media.get("attendance_signal", 0)
 
-        # Store sentiment explicitly
         metrics["sentiment_score"] = media.get("sentiment_score", 0.0)
 
-        # New: keep track of raw event counts
+        # raw event counts
         metrics["media_positive_events"] = (
             metrics.get("media_positive_events", 0) + media.get("positive_events", 0)
         )
@@ -118,21 +144,16 @@ def load_metrics_for(politician_id: int) -> Dict[str, Any]:
     except Exception as e:
         print(f"[metric_loader] media_scraper failed: {e}")
         metrics["sentiment_score"] = 0.0
-        metrics.setdefault("media_positive_events", 0)
-        metrics.setdefault("media_negative_events", 0)
 
     # ------------------------------------------------------
-    # 3) SOCIAL SIGNALS (Gemini-derived influence)
+    # 3) SOCIAL SIGNALS (Gemini)
     # ------------------------------------------------------
     try:
         social = scrape_social_signals(politician_id)
 
         influence_boost = float(social.get("influence_boost", 0.0))
 
-        # Direct social influence metric (0–10 normalized later in scoring_engine)
         metrics["social_influence"] = influence_boost
-
-        # Also slightly adjust party_control_index as a proxy for power inside structure
         metrics["party_control_index"] += influence_boost
 
     except Exception as e:

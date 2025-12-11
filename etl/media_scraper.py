@@ -1,3 +1,5 @@
+# etl/media_scraper.py
+
 import os
 import json
 from typing import Dict, Any, List, Optional
@@ -24,15 +26,36 @@ load_dotenv()
 SERPAPI_KEY = os.getenv("SERPAPI_KEY")
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 
+# ==========================================================
+# TEST MODE — automatically activated during pytest
+# ==========================================================
+TEST_MODE = os.getenv("TEST_MODE", "false").lower() == "true"
+
+if TEST_MODE:
+    print("⚠ media_scraper: TEST MODE active — RSS, SerpAPI, Gemini disabled.")
+
 
 # =====================================================================
 # 1. PROFILE CONTEXT DETECTION
 # =====================================================================
 def _detect_profile_context(entity_id: int) -> Dict[str, Optional[str]]:
     """
-    Detects profile type (politician, media, judiciary, academic, vip)
-    by checking Supabase tables: politicians → profiles.
+    Attempts to classify a profile by checking:
+    1. politicians table
+    2. profiles table
+    Falls back to 'unknown'.
     """
+
+    # ---------------------------
+    # TEST MODE SHORTCUT
+    # ---------------------------
+    if TEST_MODE:
+        return {
+            "profile_type": "unknown",
+            "name": "Test User",
+            "country": None,
+            "party": None,
+        }
 
     # --- Politicians table ---
     try:
@@ -55,7 +78,7 @@ def _detect_profile_context(entity_id: int) -> Dict[str, Optional[str]]:
     except Exception as e:
         print(f"[media_scraper] politician lookup failed: {e}")
 
-    # --- Generic profiles table ---
+    # --- Profiles table ---
     try:
         rows = _get(
             "profiles",
@@ -65,7 +88,6 @@ def _detect_profile_context(entity_id: int) -> Dict[str, Optional[str]]:
                 "limit": 1,
             },
         )
-
         if rows:
             row = rows[0]
             raw = (
@@ -75,13 +97,13 @@ def _detect_profile_context(entity_id: int) -> Dict[str, Optional[str]]:
                 or ""
             ).lower()
 
-            if any(k in raw for k in ["media", "journalist", "anchor", "tv"]):
+            if any(k in raw for k in ["media", "journalist", "tv", "anchor"]):
                 ptype = "media"
             elif any(k in raw for k in ["judge", "court", "judicial"]):
                 ptype = "judiciary"
             elif any(k in raw for k in ["professor", "academic", "scholar"]):
                 ptype = "academic"
-            elif any(k in raw for k in ["vip", "public", "influencer"]):
+            elif any(k in raw for k in ["vip", "influencer", "public"]):
                 ptype = "vip"
             else:
                 ptype = "vip"
@@ -97,23 +119,21 @@ def _detect_profile_context(entity_id: int) -> Dict[str, Optional[str]]:
         print(f"[media_scraper] profiles lookup failed: {e}")
 
     # --- Fallback ---
-    return {
-        "profile_type": "unknown",
-        "name": None,
-        "country": None,
-        "party": None,
-    }
+    return {"profile_type": "unknown", "name": None, "country": None, "party": None}
 
 
 # =====================================================================
 # 2. RSS COLLECTION
 # =====================================================================
-def _rss_articles_for_name(
-    name: str, feeds: List[str], max_per_feed: int = 25
-) -> List[Dict[str, Any]]:
+def _rss_articles_for_name(name: str, feeds: List[str], max_per_feed: int = 25) -> List[Dict[str, Any]]:
     """
-    Scan RSS feeds and collect items containing the person's name.
+    Scans RSS feeds and extracts items mentioning the target name.
     """
+
+    # TEST MODE → disable RSS entirely
+    if TEST_MODE:
+        return []
+
     if not name:
         return []
 
@@ -151,42 +171,29 @@ def _rss_articles_for_name(
 
 
 # =====================================================================
-# 3. SERPAPI ENRICHMENT (OPTIONAL)
+# 3. SERPAPI ENRICHMENT
 # =====================================================================
 def _serpapi_headlines(name: str, country: Optional[str]) -> List[str]:
-    """
-    Uses SerpAPI (if available) to enrich short headline text.
-    """
+
+    # TEST MODE disables SerpAPI
+    if TEST_MODE:
+        return []
+
     if not SERPAPI_KEY or not GoogleSearch:
         return []
 
-    query = " ".join(
-        [
-            name,
-            "profil",
-            "biografi",
-            "politikan",
-            "media",
-            "gjyqtar",
-            country or "",
-        ]
-    )
+    query = " ".join([name, "profil", "biografi", "media", "politikan", country or ""])
 
     try:
         search = GoogleSearch(
-            {
-                "q": query,
-                "api_key": SERPAPI_KEY,
-                "num": 10,
-                "hl": "sq",
-            }
+            {"q": query, "api_key": SERPAPI_KEY, "num": 10, "hl": "sq"}
         )
         res = search.get_dict()
     except Exception as e:
         print(f"[media_scraper] SerpAPI error: {e}")
         return []
 
-    texts: List[str] = []
+    texts = []
     for item in res.get("organic_results", []):
         if item.get("title"):
             texts.append(item["title"])
@@ -208,6 +215,16 @@ def _gemini_media_analysis(
 
     mentions_estimate = len(rss_articles) + len(serpapi_texts)
 
+    # TEST MODE disables Gemini
+    if TEST_MODE:
+        return {
+            "sentiment_score": 0.0,
+            "scandals_flagged": 0,
+            "mentions": mentions_estimate,
+            "positive_events": 0,
+            "negative_events": 0,
+        }
+
     if not genai or not GOOGLE_API_KEY:
         return {
             "sentiment_score": 0.0,
@@ -224,39 +241,34 @@ def _gemini_media_analysis(
     serp_text = "\n".join(f"- {t}" for t in serpapi_texts[:40])
 
     prompt = f"""
-You are NOVARIC's neutral media analyst.
-
-Subject: "{name}"
-Profile type: "{profile_type}"
-
-DATA FROM RSS:
-{rss_text}
-
-DATA FROM SERPAPI:
-{serp_text}
+Analyse the following media signals for subject '{name}'.
 
 Return ONLY JSON:
 {{
-  "sentiment_score": -1 to 1,
+  "sentiment_score": float,
   "scandals_flagged": int,
   "mentions": int,
   "positive_events": int,
   "negative_events": int
 }}
+
+RSS:
+{rss_text}
+
+SERPAPI:
+{serp_text}
 """
 
     try:
         response = model.generate_content(prompt, generation_config={"temperature": 0.25})
         text = response.text.strip()
 
-        # Remove ```json fences
         if text.startswith("```"):
             text = text.strip("`")
             if text.startswith("json"):
                 text = text[4:].strip()
 
         data = json.loads(text)
-
         return {
             "sentiment_score": float(data.get("sentiment_score", 0.0)),
             "scandals_flagged": int(data.get("scandals_flagged", 0)),
@@ -281,7 +293,7 @@ Return ONLY JSON:
 # =====================================================================
 def scrape_media_signals(entity_id: int) -> Dict[str, Any]:
     """
-    Unified hybrid media analysis engine (RSS → SerpAPI → Gemini → Output).
+    Hybrid media analysis using RSS → SerpAPI → Gemini.
     """
 
     ctx = _detect_profile_context(entity_id)
@@ -300,12 +312,11 @@ def scrape_media_signals(entity_id: int) -> Dict[str, Any]:
             "negative_events": 0,
         }
 
-    print(f"📰 Scraping media for {profile_type} '{name}' (ID {entity_id})...")
+    if not TEST_MODE:
+        print(f"📰 Scraping media for {profile_type} '{name}' (ID {entity_id})...")
 
-    # The new universal selector
     feeds = get_feeds_for_profile_type(profile_type)
 
-    # Hybrid collection pipeline
     rss_articles = _rss_articles_for_name(name, feeds)
     serpapi_texts = _serpapi_headlines(name, country)
     analysis = _gemini_media_analysis(name, profile_type, rss_articles, serpapi_texts)

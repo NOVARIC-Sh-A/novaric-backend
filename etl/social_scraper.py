@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 from utils.supabase_client import _get
 from etl.media_scraper import scrape_media_signals
 
-# Google Gemini (optional)
+# Gemini (optional dependency)
 try:
     import google.generativeai as genai  # type: ignore
 except Exception:
@@ -24,8 +24,9 @@ GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 # =====================================================================
 def _detect_profile_context(entity_id: int) -> Dict[str, Optional[str]]:
     """
-    Detects profile type automatically (politician, media, judiciary, academic, vip)
-    using Supabase live tables: politicians, profiles.
+    Detect the profile type using Supabase tables:
+    - politicians
+    - profiles
     """
 
     # --- Politicians table ---
@@ -39,12 +40,12 @@ def _detect_profile_context(entity_id: int) -> Dict[str, Optional[str]]:
             },
         )
         if rows:
-            row = rows[0]
+            r = rows[0]
             return {
                 "profile_type": "politician",
-                "name": row.get("name"),
-                "country": row.get("country"),
-                "party": row.get("party"),
+                "name": r.get("name"),
+                "country": r.get("country"),
+                "party": r.get("party"),
             }
     except Exception as e:
         print(f"[social_scraper] politician lookup failed: {e}")
@@ -59,12 +60,14 @@ def _detect_profile_context(entity_id: int) -> Dict[str, Optional[str]]:
                 "limit": 1,
             },
         )
+
         if rows:
-            row = rows[0]
+            r = rows[0]
+
             raw = (
-                row.get("profile_type")
-                or row.get("category")
-                or row.get("domain")
+                r.get("profile_type")
+                or r.get("category")
+                or r.get("domain")
                 or ""
             ).lower()
 
@@ -81,10 +84,11 @@ def _detect_profile_context(entity_id: int) -> Dict[str, Optional[str]]:
 
             return {
                 "profile_type": ptype,
-                "name": row.get("name"),
+                "name": r.get("name"),
                 "country": None,
                 "party": None,
             }
+
     except Exception as e:
         print(f"[social_scraper] profiles lookup failed: {e}")
 
@@ -98,7 +102,7 @@ def _detect_profile_context(entity_id: int) -> Dict[str, Optional[str]]:
 
 
 # =====================================================================
-# 2. GEMINI-BASED SOCIAL INFLUENCE ESTIMATE
+# 2. GEMINI INFLUENCE TRANSFORM
 # =====================================================================
 def _gemini_influence_estimate(
     name: str,
@@ -107,14 +111,7 @@ def _gemini_influence_estimate(
     media_signals: Dict[str, Any],
 ) -> float:
     """
-    Converts media signals into a 0–10 'influence_boost' using Gemini.
-
-    Inputs from media_signals:
-      - mentions
-      - sentiment_score
-      - scandals_flagged
-      - positive_events
-      - negative_events
+    Converts raw media signals into a 0–10 social influence index.
     """
 
     if not genai or not GOOGLE_API_KEY:
@@ -126,50 +123,50 @@ def _gemini_influence_estimate(
     mentions = media_signals.get("mentions", 0)
     sentiment = media_signals.get("sentiment_score", 0.0)
     scandals = media_signals.get("scandals_flagged", 0)
-    pos_events = media_signals.get("positive_events", 0)
-    neg_events = media_signals.get("negative_events", 0)
+    pos = media_signals.get("positive_events", 0)
+    neg = media_signals.get("negative_events", 0)
 
     prompt = f"""
-You are NOVARIC's social-influence analyst.
+You are NOVARIC's political social-influence analyst.
 
 Subject: "{name}"
-Type: "{profile_type}"
-Party/Organisation: "{party or 'Unknown'}"
+Profile type: "{profile_type}"
+Party: "{party or 'Unknown'}"
 
 Signals:
 - mentions: {mentions}
 - sentiment_score: {sentiment}
 - scandals_flagged: {scandals}
-- positive_events: {pos_events}
-- negative_events: {neg_events}
+- positive_events: {pos}
+- negative_events: {neg}
 
-On a 0–10 scale, rate their current public influence:
-- 0 = almost no visible influence
-- 5 = typical Albanian public figure
-- 10 = highly influential / agenda-setting
+Rate influence on a 0–10 scale:
+0 = minimal visibility
+5 = typical Albanian public figure
+10 = major power broker
 
-Return ONLY valid JSON:
-{{ "influence_boost": 6.3 }}
+Return ONLY:
+{{ "influence_boost": 7.2 }}
 """
 
     try:
         response = model.generate_content(
-            prompt,
-            generation_config={"temperature": 0.25},
+            prompt, 
+            generation_config={"temperature": 0.25}
         )
         text = response.text.strip()
 
-        # Clean fenced ```json blocks if present
+        # Remove ```json wrappers if present
         if text.startswith("```"):
-            text = text.strip().strip("`")
+            text = text.strip("`")
             if text.startswith("json"):
                 text = text[4:].strip()
 
         data = json.loads(text)
-        influence_boost = float(data.get("influence_boost", 0.0))
 
-        # Clamp to 0–10
-        return max(0.0, min(10.0, influence_boost))
+        boost = float(data.get("influence_boost", 0.0))
+
+        return max(0.0, min(10.0, boost))
 
     except Exception as e:
         print(f"[social_scraper] Gemini influence estimate failed: {e}")
@@ -177,22 +174,12 @@ Return ONLY valid JSON:
 
 
 # =====================================================================
-# 3. MAIN ETL FUNCTION
+# 3. PUBLIC ENTRYPOINT
 # =====================================================================
 def scrape_social_signals(entity_id: int) -> Dict[str, Any]:
     """
-    Master ETL for extracting *social influence* signals, built on top of
-    the hybrid media pipeline (media_scraper).
-
-    Output:
-      {
-        "influence_boost": float,   # 0–10
-        "media_mentions": int,
-        "scandals_flagged": int,
-        "sentiment_score": float,
-        "positive_events": int,
-        "negative_events": int
-      }
+    Master ETL for social influence analysis.
+    Builds on top of media_scraper's hybrid pipeline.
     """
 
     ctx = _detect_profile_context(entity_id)
@@ -202,22 +189,22 @@ def scrape_social_signals(entity_id: int) -> Dict[str, Any]:
 
     print(f"🔎 Scraping social signals for {profile_type} '{name}' (ID: {entity_id})...")
 
-    # 1) Media signals (RSS + SerpAPI + Gemini)
-    media_signals = scrape_media_signals(entity_id)
+    # 1) Hybrid media analysis (RSS + SerpAPI + Gemini)
+    media = scrape_media_signals(entity_id)
 
-    # 2) Gemini-based influence transform
+    # 2) Social influence estimation (Gemini)
     influence_boost = _gemini_influence_estimate(
         name=name,
         profile_type=profile_type,
         party=party,
-        media_signals=media_signals,
+        media_signals=media,
     )
 
     return {
         "influence_boost": influence_boost,
-        "media_mentions": media_signals.get("mentions", 0),
-        "scandals_flagged": media_signals.get("scandals_flagged", 0),
-        "sentiment_score": media_signals.get("sentiment_score", 0.0),
-        "positive_events": media_signals.get("positive_events", 0),
-        "negative_events": media_signals.get("negative_events", 0),
+        "media_mentions": media.get("mentions", 0),
+        "scandals_flagged": media.get("scandals_flagged", 0),
+        "sentiment_score": media.get("sentiment_score", 0.0),
+        "positive_events": media.get("positive_events", 0),
+        "negative_events": media.get("negative_events", 0),
     }

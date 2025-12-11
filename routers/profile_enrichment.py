@@ -1,37 +1,53 @@
 # routers/profile_enrichment.py
 
-from fastapi import APIRouter, HTTPException, Depends
-from supabase import create_client, Client
+import os
+from functools import lru_cache
 from typing import Any, Dict
 
+from fastapi import APIRouter, HTTPException, Depends
+from supabase import create_client, Client
+
 from profile_advisor import ProfileAdvisor
-from schemas import VipProfileResponse   # <-- FIXED: Now importing correctly
+from schemas import VipProfileResponse
+
 
 router = APIRouter(
     prefix="/api",
     tags=["Profile Enrichment"]
 )
 
-# ---------------------------------------------------------------------
-# Supabase client initialization (replace with env vars in production)
-# ---------------------------------------------------------------------
-SUPABASE_URL = "https://YOUR_URL.supabase.co"
-SUPABASE_KEY = "YOUR_SUPABASE_KEY"
+
+# -----------------------------------------------------------
+# Supabase configuration (should come from environment vars)
+# -----------------------------------------------------------
+
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
 
+# -----------------------------------------------------------
+# Lazy-loaded Supabase Client (pytest-safe)
+# -----------------------------------------------------------
+@lru_cache()
 def get_supabase() -> Client:
+    """
+    Lazy initialization. Supabase client is created ONLY when endpoint is called,
+    NOT during module import (which avoids pytest freezing).
+    """
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        raise RuntimeError("Supabase credentials are not configured.")
+
     return create_client(SUPABASE_URL, SUPABASE_KEY)
 
 
-# ---------------------------------------------------------------------
+# -----------------------------------------------------------
 # GET /api/profile/{profile_id}
-# Returns the enriched VIP Profile
-# ---------------------------------------------------------------------
+# -----------------------------------------------------------
 @router.get("/profile/{profile_id}", response_model=VipProfileResponse)
 async def get_profile(profile_id: str, supabase: Client = Depends(get_supabase)) -> Dict[str, Any]:
     """
-    Fetch the raw profile from Supabase, enrich it using the Profile Advisor,
-    and return a fully structured VipProfileResponse model.
+    Fetch a VIP profile from Supabase, enrich it using ProfileAdvisor,
+    and return a structured VipProfileResponse object.
     """
 
     # 1. Fetch from Supabase
@@ -49,14 +65,12 @@ async def get_profile(profile_id: str, supabase: Client = Depends(get_supabase))
     if not profile_data:
         raise HTTPException(status_code=404, detail="Profile not found")
 
-    # 2. Run AI enrichment (ProfileAdvisor)
+    # 2. Run ProfileAdvisor (AI psychologist)
     advisor = ProfileAdvisor(profile_data)
     improvement_checklist = advisor.generate_checklist()
 
-    # 3. Build response payload (matches VipProfileResponse)
-    response_data = {
+    # 3. Build standardized response
+    return {
         **profile_data,
-        "improvement_checklist": improvement_checklist
+        "improvement_checklist": improvement_checklist,
     }
-
-    return response_data

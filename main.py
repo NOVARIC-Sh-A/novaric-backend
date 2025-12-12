@@ -53,7 +53,7 @@ app.add_middleware(
 
 
 # ================================================================
-# MODELS
+# MODELS (Legacy MARAGON)
 # ================================================================
 class AnalysisRequest(BaseModel):
     ids: List[str]
@@ -106,7 +106,7 @@ def health_probe():
 
 
 # ================================================================
-# PROFILES
+# PROFILES (Legacy MARAGON)
 # ================================================================
 @app.get("/api/profiles")
 def get_profiles():
@@ -139,9 +139,9 @@ def analyze_profiles(request: AnalysisRequest):
             continue
 
         analysis = (
-            profile.get("maragonAnalysis")
-            or profile.get("paragonAnalysis")
-            or []
+            profile.get("maragonAnalysis") or
+            profile.get("paragonAnalysis") or
+            []
         )
 
         dims = {
@@ -164,7 +164,7 @@ def analyze_profiles(request: AnalysisRequest):
 
 
 # ================================================================
-# NEWS AGGREGATION (FIXED)
+# NEWS AGGREGATION — FIXED & STABLE VERSION
 # ================================================================
 INTERNATIONAL_FEEDS = TIER1_GLOBAL_NEWS
 ALBANIAN_FEEDS = ALBANIAN_MEDIA_FEEDS
@@ -183,25 +183,36 @@ async def get_news():
         try:
             feed = feedparser.parse(url)
 
-            # FIX: feed.status may not exist in newer feedparser versions
-            status = getattr(feed, "status", None)
+            # SAFELY extract status
+            status = None
+            if hasattr(feed, "status"):
+                status = feed.status
+            elif "status" in feed:
+                status = feed["status"]
 
-            # Ignore broken feeds
-            if getattr(feed, "bozo", False) and status not in (200, 301, None):
-                logger.warning(f"Feed error on {url}: bozo={feed.bozo}, status={status}")
+            # Handle malformed RSS or HTTP failures
+            if feed.bozo:
+                exc = getattr(feed, "bozo_exception", None)
+                logger.warning(f"[BOZO] RSS parsing issue for {url}: {exc}")
+
+                # If HTTP code available and invalid → skip feed
+                if status and status not in (200, 301):
+                    continue
+
+            entries = getattr(feed, "entries", [])
+            if not entries:
+                logger.warning(f"[EMPTY] Feed returned no entries: {url}")
                 continue
 
-            for entry in feed.entries[:7]:
-                # Try image extraction safely
+            # Process feed entries
+            for entry in entries[:7]:
                 image = ""
 
-                if getattr(entry, "media_content", None):
+                if hasattr(entry, "media_content") and entry.media_content:
                     image = entry.media_content[0].get("url", "")
-
-                elif getattr(entry, "media_thumbnail", None):
+                elif hasattr(entry, "media_thumbnail") and entry.media_thumbnail:
                     image = entry.media_thumbnail[0].get("url", "")
-
-                elif getattr(entry, "links", None):
+                elif hasattr(entry, "links"):
                     for link in entry.links:
                         if link.get("type", "").startswith("image"):
                             image = link.get("href", "")
@@ -221,8 +232,8 @@ async def get_news():
                     )
                 )
 
-        except Exception as ex:
-            logger.error(f"RSS feed error for {url}: {ex}")
+        except Exception as e:
+            logger.error(f"[ERROR] Exception while loading {url}: {e}")
             continue
 
     return articles
@@ -249,16 +260,13 @@ def shutdown_event():
 
 
 # ================================================================
-# CLOUD RUN ENTRYPOINT
+# LOCAL DEV ENTRYPOINT
 # ================================================================
 if __name__ == "__main__":
     import uvicorn
-
-    port = int(os.getenv("PORT", 8080))  # Cloud Run provides $PORT
-
     uvicorn.run(
         "main:app",
         host="0.0.0.0",
-        port=port,
+        port=int(os.getenv("PORT", 8080)),
         reload=False
     )

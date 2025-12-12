@@ -53,7 +53,7 @@ app.add_middleware(
 
 
 # ================================================================
-# MODELS (Legacy MARAGON)
+# MODELS
 # ================================================================
 class AnalysisRequest(BaseModel):
     ids: List[str]
@@ -80,7 +80,7 @@ class NewsArticle(BaseModel):
 
 
 # ================================================================
-# HEALTH CHECK (Cloud Run)
+# HEALTH CHECK
 # ================================================================
 @app.get("/")
 def root():
@@ -106,7 +106,7 @@ def health_probe():
 
 
 # ================================================================
-# PROFILES (Legacy MARAGON)
+# PROFILES
 # ================================================================
 @app.get("/api/profiles")
 def get_profiles():
@@ -125,7 +125,7 @@ def get_profile(profile_id: str):
 
 
 # ================================================================
-# ANALYSIS BATCH (Legacy)
+# ANALYSIS BATCH
 # ================================================================
 @app.post("/api/profiles/analysis-batch", response_model=AnalysisBatchResponse)
 def analyze_profiles(request: AnalysisRequest):
@@ -182,14 +182,18 @@ async def get_news():
     for url, category in ALL_FEEDS:
         try:
             feed = feedparser.parse(url)
+
+            # SAFE STATUS EXTRACTION (prevents crashes)
             status = getattr(feed, "status", 200)
 
             if feed.bozo and status not in (200, 301):
+                logger.warning(f"[NEWS] Skipping broken feed: {url} (status={status})")
                 continue
 
             for entry in feed.entries[:7]:
                 image = ""
 
+                # Preferred image formats
                 if hasattr(entry, "media_content") and entry.media_content:
                     image = entry.media_content[0].get("url", "")
                 elif hasattr(entry, "media_thumbnail") and entry.media_thumbnail:
@@ -207,20 +211,21 @@ async def get_news():
                         content=(entry.get("summary", "")[:300] + "..."),
                         imageUrl=image,
                         category=category,
-                        timestamp=entry.get(
-                            "published",
-                            entry.get("updated", "Unknown")
-                        ),
+                        timestamp=entry.get("published", entry.get("updated", "Unknown")),
                     )
                 )
-        except Exception:
+
+        except Exception as e:
+            logger.error(f"[NEWS] Error parsing feed {url}: {e}")
             continue
+
+    logger.info(f"[NEWS] Total aggregated articles: {len(articles)}")
 
     return articles
 
 
 # ================================================================
-# REGISTER ROUTERS
+# ROUTERS
 # ================================================================
 app.include_router(paragon_router)
 app.include_router(enrichment_router)

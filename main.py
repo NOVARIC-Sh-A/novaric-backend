@@ -45,7 +45,7 @@ app = FastAPI(
 # ================================================================
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -164,14 +164,14 @@ def analyze_profiles(request: AnalysisRequest):
 
 
 # ================================================================
-# NEWS AGGREGATION (V1 API)
+# NEWS AGGREGATION (FIXED)
 # ================================================================
 INTERNATIONAL_FEEDS = TIER1_GLOBAL_NEWS
 ALBANIAN_FEEDS = ALBANIAN_MEDIA_FEEDS
 
 ALL_FEEDS = (
-    [(url, "International") for url in INTERNATIONAL_FEEDS]
-    + [(url, "Albanian") for url in ALBANIAN_FEEDS]
+    [(url, "International") for url in INTERNATIONAL_FEEDS] +
+    [(url, "Albanian") for url in ALBANIAN_FEEDS]
 )
 
 
@@ -183,22 +183,25 @@ async def get_news():
         try:
             feed = feedparser.parse(url)
 
-            # SAFE STATUS EXTRACTION (prevents crashes)
-            status = getattr(feed, "status", 200)
+            # FIX: feed.status may not exist in newer feedparser versions
+            status = getattr(feed, "status", None)
 
-            if feed.bozo and status not in (200, 301):
-                logger.warning(f"[NEWS] Skipping broken feed: {url} (status={status})")
+            # Ignore broken feeds
+            if getattr(feed, "bozo", False) and status not in (200, 301, None):
+                logger.warning(f"Feed error on {url}: bozo={feed.bozo}, status={status}")
                 continue
 
             for entry in feed.entries[:7]:
+                # Try image extraction safely
                 image = ""
 
-                # Preferred image formats
-                if hasattr(entry, "media_content") and entry.media_content:
+                if getattr(entry, "media_content", None):
                     image = entry.media_content[0].get("url", "")
-                elif hasattr(entry, "media_thumbnail") and entry.media_thumbnail:
+
+                elif getattr(entry, "media_thumbnail", None):
                     image = entry.media_thumbnail[0].get("url", "")
-                elif hasattr(entry, "links"):
+
+                elif getattr(entry, "links", None):
                     for link in entry.links:
                         if link.get("type", "").startswith("image"):
                             image = link.get("href", "")
@@ -211,21 +214,22 @@ async def get_news():
                         content=(entry.get("summary", "")[:300] + "..."),
                         imageUrl=image,
                         category=category,
-                        timestamp=entry.get("published", entry.get("updated", "Unknown")),
+                        timestamp=entry.get(
+                            "published",
+                            entry.get("updated", "Unknown")
+                        ),
                     )
                 )
 
-        except Exception as e:
-            logger.error(f"[NEWS] Error parsing feed {url}: {e}")
+        except Exception as ex:
+            logger.error(f"RSS feed error for {url}: {ex}")
             continue
-
-    logger.info(f"[NEWS] Total aggregated articles: {len(articles)}")
 
     return articles
 
 
 # ================================================================
-# ROUTERS
+# REGISTER ROUTERS
 # ================================================================
 app.include_router(paragon_router)
 app.include_router(enrichment_router)
@@ -245,13 +249,16 @@ def shutdown_event():
 
 
 # ================================================================
-# LOCAL DEV ENTRYPOINT
+# CLOUD RUN ENTRYPOINT
 # ================================================================
 if __name__ == "__main__":
     import uvicorn
+
+    port = int(os.getenv("PORT", 8080))  # Cloud Run provides $PORT
+
     uvicorn.run(
         "main:app",
         host="0.0.0.0",
-        port=int(os.getenv("PORT", 8080)),
+        port=port,
         reload=False
     )

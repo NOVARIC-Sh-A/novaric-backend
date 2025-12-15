@@ -4,6 +4,10 @@ from typing import List, Dict
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.openapi.docs import get_swagger_ui_html
+from fastapi.responses import HTMLResponse
+
 from pydantic import BaseModel
 import feedparser
 
@@ -35,7 +39,27 @@ app = FastAPI(
     title="NOVARIC Backend",
     description="NOVARIC® PARAGON Engine • Profile Enrichment • News Aggregation",
     version="2.1.0",
+    docs_url=None,        # Disable default Swagger
+    redoc_url=None
 )
+
+
+# ================================================================
+# STATIC FILES (FAVICON)
+# ================================================================
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
+
+# ================================================================
+# CUSTOM SWAGGER DOCS (BRANDED)
+# ================================================================
+@app.get("/docs", include_in_schema=False)
+def custom_swagger_docs():
+    return get_swagger_ui_html(
+        openapi_url="/openapi.json",
+        title="NOVARIC® Backend API",
+        swagger_favicon_url="/static/favicon.ico",
+    )
 
 
 # ================================================================
@@ -78,7 +102,7 @@ class NewsArticle(BaseModel):
 
 
 # ================================================================
-# HEALTH CHECK
+# HEALTH CHECK / ROOT
 # ================================================================
 @app.get("/")
 def root():
@@ -163,7 +187,7 @@ def analyze_profiles(request: AnalysisRequest):
 
 
 # ================================================================
-# NEWS AGGREGATION — CATEGORY-AWARE (BACKWARD SAFE)
+# NEWS AGGREGATION — CATEGORY-AWARE
 # ================================================================
 @app.get("/api/v1/news", response_model=List[NewsArticle])
 async def get_news(
@@ -184,18 +208,13 @@ async def get_news(
             feed = feedparser.parse(url)
             status = getattr(feed, "status", None)
 
-            # Handle malformed RSS or HTTP failures
             if feed.bozo:
                 exc = getattr(feed, "bozo_exception", None)
                 logger.warning(f"[BOZO] RSS parsing issue for {url}: {exc}")
                 if status and status not in (200, 301):
                     continue
 
-            entries = getattr(feed, "entries", [])
-            if not entries:
-                continue
-
-            for entry in entries[:7]:
+            for entry in getattr(feed, "entries", [])[:7]:
                 image = ""
 
                 if hasattr(entry, "media_content") and entry.media_content:

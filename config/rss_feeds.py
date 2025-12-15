@@ -9,6 +9,7 @@ Central repository for all RSS feed lists used by:
 - Judiciary profiles
 - Academic profiles
 - VIP profiles
+- Public News API (/api/v1/news)
 
 Feeds are grouped by:
 - Domain relevance
@@ -94,9 +95,9 @@ MEDIA_PROFILE_SCRAPER_FEEDS = [
 
 JUDICIARY_PROFILE_SCRAPER_FEEDS = [
     # Legal + Ethics news
-    "https://www.icj.org/feed/",               # International Commission of Jurists
-    "https://www.coe.int/en/web/portal/-/news/rss",  # Council of Europe
-    "https://www.echr.coe.int/rss/en",         # European Court of Human Rights
+    "https://www.icj.org/feed/",                      # International Commission of Jurists
+    "https://www.coe.int/en/web/portal/-/news/rss",   # Council of Europe
+    "https://www.echr.coe.int/rss/en",                # European Court of Human Rights
     # Albanian legal media
     "https://plaku.al/feed/",
     "https://liga.al/feed/",
@@ -112,7 +113,7 @@ ACADEMIC_PROFILE_FEEDS = [
     "https://www.nature.com/nature/articles?type=research&format=rss",
     "https://www.sciencedaily.com/rss/all.xml",
     "https://www.timeshighereducation.com/rss",
-    # Albania & region education/academia
+    # Albania & region education / academia
     "https://universiteti.edu.al/feed",
     "https://akaps.al/feed/",
 ]
@@ -144,7 +145,7 @@ ALL_RSS_FEEDS = list(
 
 
 # ==============================================================
-# 10. PROFILE_TYPE → FEED MAP (centralized for scrapers)
+# 10. PROFILE_TYPE → FEED MAP (SCRAPERS / ENRICHMENT)
 # ==============================================================
 
 PROFILE_FEED_MAP = {
@@ -156,10 +157,41 @@ PROFILE_FEED_MAP = {
     "unknown": ALL_RSS_FEEDS,
 }
 
+
 def get_feeds_for_profile_type(profile_type: str):
     """
-    Public helper for scrapers.
+    Public helper for scrapers and enrichment engines.
     Guarantees a deterministic feed list for any profile class.
     """
     key = (profile_type or "unknown").lower()
     return PROFILE_FEED_MAP.get(key, ALL_RSS_FEEDS)
+
+
+# ==============================================================
+# 11. NEWS API CATEGORY → FEED MAP (PUBLIC API)
+# ==============================================================
+
+NEWS_CATEGORY_FEED_MAP = {
+    "international": TIER1_GLOBAL_NEWS,
+    "balkan": BALKAN_REGIONAL_FEEDS,
+    "albanian": ALBANIAN_MEDIA_FEEDS,
+    "politics": POLITICAL_RELEVANCE_FEEDS,
+    "media": MEDIA_PROFILE_SCRAPER_FEEDS,
+    "judiciary": JUDICIARY_PROFILE_SCRAPER_FEEDS,
+    "academic": ACADEMIC_PROFILE_FEEDS,
+    "vip": VIP_PROFILE_FEEDS,
+    "all": ALL_RSS_FEEDS,
+}
+
+
+def get_feeds_for_news_category(category: str):
+    """
+    Public helper for /api/v1/news
+
+    Guarantees:
+    - Backward compatibility (defaults to Tier 1 International)
+    - Deterministic feed resolution
+    - No broken links or undefined categories
+    """
+    key = (category or "international").lower()
+    return NEWS_CATEGORY_FEED_MAP.get(key, TIER1_GLOBAL_NEWS)

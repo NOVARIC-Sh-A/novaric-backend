@@ -2,7 +2,7 @@ import os
 import logging
 from typing import List, Dict
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import feedparser
@@ -14,11 +14,9 @@ from utils.data_loader import load_profiles_data
 from paragon_api import router as paragon_router
 from routers.profile_enrichment import router as enrichment_router
 
-# Feed Registry
-from config.rss_feeds import (
-    TIER1_GLOBAL_NEWS,
-    ALBANIAN_MEDIA_FEEDS,
-)
+# Feed Registry (Category-aware)
+from config.rss_feeds import get_feeds_for_news_category
+
 
 # ================================================================
 # LOGGING
@@ -36,7 +34,7 @@ logger = logging.getLogger("novaric-backend")
 app = FastAPI(
     title="NOVARIC Backend",
     description="NOVARIC® PARAGON Engine • Profile Enrichment • News Aggregation",
-    version="2.0.0",
+    version="2.1.0",
 )
 
 
@@ -139,18 +137,19 @@ def analyze_profiles(request: AnalysisRequest):
             continue
 
         analysis = (
-            profile.get("maragonAnalysis") or
-            profile.get("paragonAnalysis") or
-            []
+            profile.get("maragonAnalysis")
+            or profile.get("paragonAnalysis")
+            or []
         )
 
         dims = {
             item["dimension"]: item.get("score", 0)
-            for item in analysis if item.get("dimension")
+            for item in analysis
+            if item.get("dimension")
         }
 
-        vals = list(dims.values())
-        overall = int(sum(vals) / len(vals)) if vals else 0
+        values = list(dims.values())
+        overall = int(sum(values) / len(values)) if values else 0
 
         results.append(
             AnalysisResponseItem(
@@ -164,47 +163,38 @@ def analyze_profiles(request: AnalysisRequest):
 
 
 # ================================================================
-# NEWS AGGREGATION — FIXED & STABLE VERSION
+# NEWS AGGREGATION — CATEGORY-AWARE (BACKWARD SAFE)
 # ================================================================
-INTERNATIONAL_FEEDS = TIER1_GLOBAL_NEWS
-ALBANIAN_FEEDS = ALBANIAN_MEDIA_FEEDS
-
-ALL_FEEDS = (
-    [(url, "International") for url in INTERNATIONAL_FEEDS] +
-    [(url, "Albanian") for url in ALBANIAN_FEEDS]
-)
-
-
 @app.get("/api/v1/news", response_model=List[NewsArticle])
-async def get_news():
-    articles = []
+async def get_news(
+    category: str = Query(
+        default="international",
+        description=(
+            "News category: international, balkan, albanian, politics, "
+            "media, judiciary, academic, vip, all"
+        )
+    )
+):
+    articles: List[NewsArticle] = []
 
-    for url, category in ALL_FEEDS:
+    feeds = get_feeds_for_news_category(category)
+
+    for url in feeds:
         try:
             feed = feedparser.parse(url)
-
-            # SAFELY extract status
-            status = None
-            if hasattr(feed, "status"):
-                status = feed.status
-            elif "status" in feed:
-                status = feed["status"]
+            status = getattr(feed, "status", None)
 
             # Handle malformed RSS or HTTP failures
             if feed.bozo:
                 exc = getattr(feed, "bozo_exception", None)
                 logger.warning(f"[BOZO] RSS parsing issue for {url}: {exc}")
-
-                # If HTTP code available and invalid → skip feed
                 if status and status not in (200, 301):
                     continue
 
             entries = getattr(feed, "entries", [])
             if not entries:
-                logger.warning(f"[EMPTY] Feed returned no entries: {url}")
                 continue
 
-            # Process feed entries
             for entry in entries[:7]:
                 image = ""
 
@@ -224,7 +214,7 @@ async def get_news():
                         title=entry.get("title", "No Title"),
                         content=(entry.get("summary", "")[:300] + "..."),
                         imageUrl=image,
-                        category=category,
+                        category=category.capitalize(),
                         timestamp=entry.get(
                             "published",
                             entry.get("updated", "Unknown")
@@ -264,6 +254,7 @@ def shutdown_event():
 # ================================================================
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(
         "main:app",
         host="0.0.0.0",

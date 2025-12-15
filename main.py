@@ -6,7 +6,7 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.openapi.docs import get_swagger_ui_html
-from fastapi.responses import HTMLResponse
+from fastapi.responses import Response
 
 from pydantic import BaseModel
 import feedparser
@@ -33,21 +33,35 @@ logger = logging.getLogger("novaric-backend")
 
 
 # ================================================================
-# FASTAPI APP
+# FASTAPI APP (Swagger disabled – custom docs below)
 # ================================================================
 app = FastAPI(
     title="NOVARIC Backend",
     description="Official NOVARIC® Backend Services • NOVARIC® PARAGON Engine • Profile Enrichment • News Aggregation",
     version="2.1.0",
-    docs_url=None,        # Disable default Swagger
-    redoc_url=None
+    docs_url=None,
+    redoc_url=None,
 )
 
 
 # ================================================================
-# STATIC FILES (FAVICON)
+# STATIC FILES (favicon, assets)
 # ================================================================
-app.mount("/static", StaticFiles(directory="static"), name="static")
+app.mount(
+    "/static",
+    StaticFiles(directory="static"),
+    name="static"
+)
+
+
+# ================================================================
+# FAVICON FALLBACK (CRITICAL)
+# Browsers often ignore Swagger favicon config and request /favicon.ico
+# ================================================================
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon():
+    with open("static/favicon.ico", "rb") as f:
+        return Response(f.read(), media_type="image/x-icon")
 
 
 # ================================================================
@@ -67,7 +81,7 @@ def custom_swagger_docs():
 # ================================================================
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],  # tighten in production
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -102,7 +116,7 @@ class NewsArticle(BaseModel):
 
 
 # ================================================================
-# HEALTH CHECK / ROOT
+# ROOT / HEALTH
 # ================================================================
 @app.get("/")
 def root():
@@ -122,7 +136,7 @@ def root():
     }
 
 
-@app.get("/healthz")
+@app.get("/healthz", include_in_schema=False)
 def health_probe():
     return {"status": "healthy"}
 
@@ -200,7 +214,6 @@ async def get_news(
     )
 ):
     articles: List[NewsArticle] = []
-
     feeds = get_feeds_for_news_category(category)
 
     for url in feeds:
@@ -269,7 +282,7 @@ def shutdown_event():
 
 
 # ================================================================
-# LOCAL DEV ENTRYPOINT
+# LOCAL / CLOUD RUN ENTRYPOINT
 # ================================================================
 if __name__ == "__main__":
     import uvicorn

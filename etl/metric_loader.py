@@ -14,20 +14,33 @@ It produces a unified metric dictionary passed to scoring_engine.
 """
 
 from typing import Dict, Any
+import os
 
 from utils.supabase_client import _get
-from etl.media_scraper import scrape_media_signals
-from etl.social_scraper import scrape_social_signals
 
 # ------------------------------------------------------------
 # TEST MODE — disables live scraping during pytest
 # ------------------------------------------------------------
-import os
 TEST_MODE = os.getenv("TEST_MODE", "false").lower() == "true"
 
 if TEST_MODE:
     print("⚠ metric_loader: TEST MODE active — media & social scrapers disabled.")
-    
+
+
+# ============================================================
+# LAZY IMPORT WRAPPERS (CRITICAL FOR CLOUD RUN STARTUP)
+# These prevent heavy optional dependencies from crashing
+# the container before Uvicorn binds to PORT=8080.
+# ============================================================
+def _lazy_media_scraper():
+    from etl.media_scraper import scrape_media_signals
+    return scrape_media_signals
+
+
+def _lazy_social_scraper():
+    from etl.social_scraper import scrape_social_signals
+    return scrape_social_signals
+
 
 # =====================================================================
 # 1. Base structured metrics from Supabase
@@ -124,6 +137,7 @@ def load_metrics_for(politician_id: int) -> Dict[str, Any]:
     # 2) HYBRID MEDIA SIGNALS (RSS + SERPAPI + Gemini)
     # ------------------------------------------------------
     try:
+        scrape_media_signals = _lazy_media_scraper()
         media = scrape_media_signals(politician_id)
 
         metrics["media_mentions_monthly"] += media.get("mentions", 0)
@@ -135,10 +149,12 @@ def load_metrics_for(politician_id: int) -> Dict[str, Any]:
 
         # raw event counts
         metrics["media_positive_events"] = (
-            metrics.get("media_positive_events", 0) + media.get("positive_events", 0)
+            metrics.get("media_positive_events", 0)
+            + media.get("positive_events", 0)
         )
         metrics["media_negative_events"] = (
-            metrics.get("media_negative_events", 0) + media.get("negative_events", 0)
+            metrics.get("media_negative_events", 0)
+            + media.get("negative_events", 0)
         )
 
     except Exception as e:
@@ -149,6 +165,7 @@ def load_metrics_for(politician_id: int) -> Dict[str, Any]:
     # 3) SOCIAL SIGNALS (Gemini)
     # ------------------------------------------------------
     try:
+        scrape_social_signals = _lazy_social_scraper()
         social = scrape_social_signals(politician_id)
 
         influence_boost = float(social.get("influence_boost", 0.0))

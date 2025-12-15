@@ -37,7 +37,7 @@ logger = logging.getLogger("novaric-backend")
 # ================================================================
 app = FastAPI(
     title="NOVARIC Backend",
-    description="NOVARIC® PARAGON Engine • Profile Enrichment • News Aggregation",
+    description="Official NOVARIC® Backend Services • NOVARIC® PARAGON Engine • Profile Enrichment • News Aggregation",
     version="2.1.0",
     docs_url=None,        # Disable default Swagger
     redoc_url=None
@@ -54,7 +54,7 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 # CUSTOM SWAGGER DOCS (BRANDED)
 # ================================================================
 @app.get("/docs", include_in_schema=False)
-def custom_swagger_docs():
+def custom_swagger_ui():
     return get_swagger_ui_html(
         openapi_url="/openapi.json",
         title="NOVARIC® Backend API",

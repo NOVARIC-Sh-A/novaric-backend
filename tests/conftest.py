@@ -1,5 +1,6 @@
 # tests/conftest.py
 
+from readline import backend
 import pytest
 from fastapi.testclient import TestClient
 from unittest.mock import patch

@@ -54,7 +54,7 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 # CUSTOM SWAGGER DOCS (BRANDED)
 # ================================================================
 @app.get("/docs", include_in_schema=False)
-def custom_swagger_ui():
+def custom_swagger_docs():
     return get_swagger_ui_html(
         openapi_url="/openapi.json",
         title="NOVARIC® Backend API",

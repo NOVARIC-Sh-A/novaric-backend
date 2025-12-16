@@ -52,14 +52,10 @@ BALKAN_REGIONAL_FEEDS = [
 # ==============================================================
 
 ALBANIAN_MEDIA_FEEDS = [
-    "https://top-channel.tv/rss",
     "https://balkanweb.com/feed",
     "https://faxweb.al/feed",
     "https://euronews.al/feed",
-    "https://exit.al/feed/",
     "https://lapsi.al/feed/",
-    "https://ora-news.tv/feed/",
-    "https://newsbomb.al/feed/",
     "https://abcnews.al/feed/",
 ]
 

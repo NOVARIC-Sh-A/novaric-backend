@@ -15,31 +15,38 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
 
-if not SUPABASE_URL:
-    raise Exception("❌ SUPABASE_URL is missing. Add it to .env or Cloud Run environment settings.")
-
 # Prefer SERVICE-ROLE key (required for ETL writes)
 SUPABASE_KEY = SUPABASE_SERVICE_ROLE_KEY or SUPABASE_ANON_KEY
-if not SUPABASE_KEY:
-    raise Exception("❌ No Supabase API key found (SERVICE_ROLE_KEY or ANON_KEY).")
 
 # ----------------------------------------------------
-# REST endpoint config
+# INTERNAL: Ensure configuration is available
+# (CRITICAL: do NOT raise at import time for Cloud Run)
 # ----------------------------------------------------
-REST_URL = f"{SUPABASE_URL.rstrip('/')}/rest/v1"
+def _ensure_config():
+    if not SUPABASE_URL:
+        raise Exception("❌ SUPABASE_URL is missing. Add it to .env or Cloud Run environment settings.")
 
-HEADERS = {
-    "apikey": SUPABASE_KEY,
-    "Authorization": f"Bearer {SUPABASE_KEY}",
-    "Content-Type": "application/json",
-}
+    if not SUPABASE_KEY:
+        raise Exception("❌ No Supabase API key found (SERVICE_ROLE_KEY or ANON_KEY).")
+
+def _rest_url() -> str:
+    _ensure_config()
+    return f"{SUPABASE_URL.rstrip('/')}/rest/v1"
+
+def _headers() -> Dict[str, str]:
+    _ensure_config()
+    return {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": "application/json",
+    }
 
 # ----------------------------------------------------
 # INTERNAL GET helper
 # ----------------------------------------------------
 def _get(path: str, params: Dict[str, Any]) -> List[Dict[str, Any]]:
-    url = f"{REST_URL}/{path.lstrip('/')}"
-    resp = requests.get(url, headers=HEADERS, params=params, timeout=20)
+    url = f"{_rest_url()}/{path.lstrip('/')}"
+    resp = requests.get(url, headers=_headers(), params=params, timeout=20)
 
     if resp.status_code == 401:
         raise Exception("❌ Unauthorized: Invalid Supabase API key")
@@ -67,12 +74,12 @@ def supabase_upsert(
     if not isinstance(records, list) or len(records) == 0:
         raise Exception("❌ supabase_upsert: 'records' must be a non-empty list")
 
-    url = f"{REST_URL}/{table}"
+    url = f"{_rest_url()}/{table}"
     params = {"on_conflict": conflict_col}
 
     resp = requests.post(
         url,
-        headers=HEADERS,
+        headers=_headers(),
         params=params,
         json=records,
         timeout=20
@@ -101,11 +108,11 @@ def supabase_insert(table: str, records: List[Dict[str, Any]]):
     if not isinstance(records, list) or len(records) == 0:
         raise Exception("❌ supabase_insert: 'records' must be a non-empty list")
 
-    url = f"{REST_URL}/{table}"
+    url = f"{_rest_url()}/{table}"
 
     resp = requests.post(
         url,
-        headers=HEADERS,
+        headers=_headers(),
         json=records,
         timeout=20
     )

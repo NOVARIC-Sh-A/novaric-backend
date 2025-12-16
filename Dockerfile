@@ -27,7 +27,8 @@ ENV PORT=8080
 ENV PYTHONUNBUFFERED=1
 
 # Ensures absolute imports work (e.g., "import utils.x")
-ENV PYTHONPATH="/app"
+# ALSO ensure installed site-packages are importable at runtime
+ENV PYTHONPATH="/home/appuser/.local/lib/python3.11/site-packages:/app"
 
 # Create non-root user (Cloud Run best practice)
 RUN useradd -m appuser
@@ -45,5 +46,5 @@ COPY --chown=appuser:appuser . /app
 # Expose the port FastAPI will run on
 EXPOSE 8080
 
-# Start application via Uvicorn
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]
+# Start application via Uvicorn (bind to Cloud Run PORT)
+CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT}"]

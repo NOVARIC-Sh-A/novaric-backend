@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 import feedparser
 from feedgen.feed import FeedGenerator
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.openapi.docs import get_swagger_ui_html
@@ -38,7 +38,6 @@ from routers.profile_enrichment import router as enrichment_router
 # ================================================================
 from config.rss_feeds import (
     get_feeds_for_news_category,
-    TIER1_GLOBAL_NEWS,
     BALKAN_REGIONAL_FEEDS,
     ALBANIAN_MEDIA_FEEDS,
 )
@@ -53,29 +52,29 @@ logging.basicConfig(
 logger = logging.getLogger("novaric-backend")
 
 # ================================================================
-# SIMPLE IN-MEMORY TTL CACHE (NEWS ENDPOINT)
+# SIMPLE IN-MEMORY TTL CACHE (NEWS)
 # ================================================================
 _NEWS_CACHE: Dict[str, Dict[str, object]] = {}
 _NEWS_CACHE_TTL_SECONDS = int(os.getenv("NEWS_CACHE_TTL_SECONDS", "60"))
 
 # ================================================================
-# FASTAPI APP (SWAGGER DISABLED – CUSTOM DOCS BELOW)
+# FASTAPI APP
 # ================================================================
 app = FastAPI(
     title="NOVARIC Backend",
-    description="Official NOVARIC® Backend Services • NOVARIC® PARAGON Engine • Profile Enrichment • News Aggregation",
+    description="Official NOVARIC® Backend Services • News • PARAGON • Enrichment",
     version="2.2.0",
     docs_url=None,
     redoc_url=None,
 )
 
 # ================================================================
-# STATIC FILES (FAVICON, ASSETS)
+# STATIC FILES
 # ================================================================
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 # ================================================================
-# FAVICON FALLBACK
+# FAVICON
 # ================================================================
 @app.get("/favicon.ico", include_in_schema=False)
 def favicon():
@@ -83,7 +82,7 @@ def favicon():
         return Response(f.read(), media_type="image/x-icon")
 
 # ================================================================
-# CUSTOM SWAGGER DOCS (BRANDED)
+# CUSTOM SWAGGER
 # ================================================================
 @app.get("/docs", include_in_schema=False)
 def custom_swagger_docs():
@@ -98,32 +97,14 @@ def custom_swagger_docs():
 # ================================================================
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # tighten in production
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 # ================================================================
-# MODELS (LEGACY MARAGON)
-# ================================================================
-class AnalysisRequest(BaseModel):
-    ids: List[str]
-    category: str
-
-
-class AnalysisResponseItem(BaseModel):
-    id: str
-    overallScore: int
-    dimensions: Dict[str, int]
-
-
-class AnalysisBatchResponse(BaseModel):
-    analyses: List[AnalysisResponseItem]
-
-
-# ================================================================
-# NEWS MODEL (AUTHORITATIVE CONTRACT FOR FRONTEND)
+# MODELS
 # ================================================================
 SourceType = Literal["international", "balkan", "albanian"]
 
@@ -154,46 +135,26 @@ def infer_source_type(feed_url: str) -> SourceType:
 
 def infer_source_name(parsed_feed: object, feed_url: str) -> str:
     try:
-        feed_meta = getattr(parsed_feed, "feed", None)
-        title = getattr(feed_meta, "title", None)
+        title = getattr(getattr(parsed_feed, "feed", None), "title", None)
         if title:
             return str(title).strip()
     except Exception:
         pass
-
-    try:
-        return urlparse(feed_url).netloc.replace("www.", "")
-    except Exception:
-        return "unknown"
+    return urlparse(feed_url).netloc.replace("www.", "")
 
 
 def extract_image(entry: object) -> str:
     try:
-        media_content = getattr(entry, "media_content", None)
-        if media_content:
-            url = media_content[0].get("url")
-            if url:
-                return str(url)
+        media = getattr(entry, "media_content", None)
+        if media and media[0].get("url"):
+            return media[0]["url"]
     except Exception:
         pass
 
     try:
-        media_thumbnail = getattr(entry, "media_thumbnail", None)
-        if media_thumbnail:
-            url = media_thumbnail[0].get("url")
-            if url:
-                return str(url)
-    except Exception:
-        pass
-
-    try:
-        links = getattr(entry, "links", None)
-        if links:
-            for link in links:
-                if (link.get("type", "") or "").startswith("image"):
-                    href = link.get("href")
-                    if href:
-                        return str(href)
+        thumbs = getattr(entry, "media_thumbnail", None)
+        if thumbs and thumbs[0].get("url"):
+            return thumbs[0]["url"]
     except Exception:
         pass
 
@@ -201,14 +162,12 @@ def extract_image(entry: object) -> str:
 
 
 def cache_get(key: str) -> Optional[List[NewsArticle]]:
-    now = time.time()
     blob = _NEWS_CACHE.get(key)
     if not blob:
         return None
-    ts = float(blob.get("ts", 0.0))
-    if (now - ts) > _NEWS_CACHE_TTL_SECONDS:
+    if time.time() - blob["ts"] > _NEWS_CACHE_TTL_SECONDS:
         return None
-    return blob.get("data")
+    return blob["data"]
 
 
 def cache_set(key: str, data: List[NewsArticle]) -> None:
@@ -224,7 +183,6 @@ def root():
         profiles_count = len(load_profiles_data())
     except Exception:
         profiles_count = 0
-
     return {
         "message": "NOVARIC® Engine Online",
         "profiles_loaded": profiles_count,
@@ -238,19 +196,16 @@ def health_probe():
 
 
 # ================================================================
-# NEWS AGGREGATION (AUTHORITATIVE PIPELINE)
+# CORE NEWS PIPELINE (PURE FUNCTION – NO FASTAPI)
 # ================================================================
-@app.get("/api/v1/news", response_model=List[NewsArticle])
-async def get_news(
-    category: str = Query(default="all")
-):
+async def collect_news_articles(category: str) -> List[NewsArticle]:
     key = (category or "all").strip().lower()
 
     cached = cache_get(key)
     if cached is not None:
         return cached
 
-    feeds = get_feeds_for_news_category(key)
+    feeds = get_feeds_for_news_category(key) or []
     articles: List[NewsArticle] = []
 
     max_entries_per_feed = int(os.getenv("NEWS_MAX_ENTRIES_PER_FEED", "7"))
@@ -262,62 +217,59 @@ async def get_news(
 
         try:
             parsed = feedparser.parse(url)
+            if getattr(parsed, "bozo", False):
+                continue
+
             source_type = infer_source_type(url)
             source_name = infer_source_name(parsed, url)
 
-            entries = getattr(parsed, "entries", []) or []
-            for entry in entries[:max_entries_per_feed]:
-                if len(articles) >= max_total_articles:
-                    break
-
-                title = (entry.get("title") or "No Title").strip()
-                summary = entry.get("summary") or entry.get("description") or ""
-                link = entry.get("link") or ""
-                entry_id = entry.get("id") or link or "unknown"
-
+            for entry in (parsed.entries or [])[:max_entries_per_feed]:
                 articles.append(
                     NewsArticle(
-                        id=str(entry_id),
-                        title=title,
-                        content=(summary[:300] + "...") if summary else "",
+                        id=str(entry.get("id") or entry.get("link") or ""),
+                        title=(entry.get("title") or "No Title").strip(),
+                        content=(entry.get("summary", "")[:300] + "..."),
                         imageUrl=extract_image(entry),
                         timestamp=entry.get("published", entry.get("updated", "")),
                         feedUrl=url,
                         sourceName=source_name,
                         sourceType=source_type,
                         category=key,
-                        originalArticleUrl=str(link) if link else None,
+                        originalArticleUrl=entry.get("link"),
                     )
                 )
 
         except Exception as e:
-            logger.error(f"[ERROR] Exception while loading {url}: {e}")
-            continue
+            logger.error(f"Feed error [{url}]: {e}")
 
     cache_set(key, articles)
     return articles
 
 
 # ================================================================
-# RSS FEED (PUBLIC, CANONICAL)
+# NEWS API
+# ================================================================
+@app.get("/api/v1/news", response_model=List[NewsArticle])
+async def get_news(category: str = Query(default="all")):
+    return await collect_news_articles(category)
+
+
+# ================================================================
+# RSS FEED (CANONICAL BACKEND DOMAIN)
 # ================================================================
 @app.get("/rss.xml", include_in_schema=False)
-async def rss_feed(
-    category: str = Query(default="all")
-):
-    articles = await get_news(category)
+async def rss_feed(category: str = Query(default="all")):
+    articles = await collect_news_articles(category)
 
     fg = FeedGenerator()
-    fg.id("https://media.novaric.al/rss.xml")
+    fg.id("https://api.media.novaric.al/rss.xml")
     fg.title("NOVARIC® Media")
     fg.link(href="https://media.novaric.al", rel="alternate")
     fg.link(
-        href=f"https://media.novaric.al/rss.xml?category={category}",
+        href=f"https://api.media.novaric.al/rss.xml?category={category}",
         rel="self",
     )
-    fg.description(
-        "Latest AI-powered media intelligence and political news from NOVARIC®."
-    )
+    fg.description("AI-powered media intelligence from NOVARIC®")
     fg.language("en")
     fg.updated(datetime.now(timezone.utc))
 
@@ -341,9 +293,7 @@ async def rss_feed(
     return Response(
         content=fg.rss_str(pretty=True),
         media_type="application/rss+xml; charset=utf-8",
-        headers={
-            "Cache-Control": "public, max-age=600"
-        },
+        headers={"Cache-Control": "public, max-age=600"},
     )
 
 
@@ -367,7 +317,7 @@ def shutdown_event():
 
 
 # ================================================================
-# LOCAL / CLOUD RUN ENTRYPOINT
+# ENTRYPOINT
 # ================================================================
 if __name__ == "__main__":
     import uvicorn

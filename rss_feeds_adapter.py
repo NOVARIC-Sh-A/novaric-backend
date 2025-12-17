@@ -6,12 +6,12 @@ to weighted, trust-aware ordering WITHOUT requiring code changes
 at call sites.
 
 Usage:
-- Import this module once at application startup
-- Or alias it as rss_feeds in sys.modules
+- Import this module once at application startup (e.g. in main.py)
+- Must be imported BEFORE config.rss_feeds is imported anywhere else
 """
 
 import sys
-import rss_feeds as _rss
+from config import rss_feeds as _rss
 
 
 # --------------------------------------------------------------
@@ -20,7 +20,9 @@ import rss_feeds as _rss
 
 def _weighted_profile_feeds(profile_type: str):
     """
-    Adapter replacement for get_feeds_for_profile_type
+    Adapter replacement for get_feeds_for_profile_type.
+    Preserves original signature and behavior, but applies
+    deterministic ranking using trust + tier metadata.
     """
     feeds = _rss.get_feeds_for_profile_type(profile_type)
     return _rss.rank_feeds(feeds)
@@ -28,14 +30,16 @@ def _weighted_profile_feeds(profile_type: str):
 
 def _weighted_news_category_feeds(category: str):
     """
-    Adapter replacement for get_feeds_for_news_category
+    Adapter replacement for get_feeds_for_news_category.
+    Preserves backward compatibility while ensuring
+    quality-ranked feed ordering.
     """
     feeds = _rss.get_feeds_for_news_category(category)
     return _rss.rank_feeds(feeds)
 
 
 # --------------------------------------------------------------
-# Monkey-patch original module functions
+# Monkey-patch original module functions (in-place)
 # --------------------------------------------------------------
 
 _rss.get_feeds_for_profile_type = _weighted_profile_feeds
@@ -43,7 +47,7 @@ _rss.get_feeds_for_news_category = _weighted_news_category_feeds
 
 
 # --------------------------------------------------------------
-# Optional: re-export module under original name (hard override)
+# Ensure all future imports see the patched module
 # --------------------------------------------------------------
 
-sys.modules["rss_feeds"] = _rss
+sys.modules["config.rss_feeds"] = _rss

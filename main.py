@@ -1,5 +1,10 @@
 # main.py
 
+# ================================================================
+# RSS FEED ADAPTER (MUST BE FIRST IMPORT)
+# ================================================================
+import rss_feeds_adapter  # activates weighted feeds globally
+
 import os
 import time
 import logging
@@ -368,7 +373,7 @@ async def get_news(
                         feedUrl=url,
                         sourceName=source_name,
                         sourceType=source_type,
-                        category=key,  # feed selection category (canonical lowercase)
+                        category=key,
                         originalArticleUrl=str(link) if link else None,
                     )
                 )
@@ -398,6 +403,7 @@ def startup_event():
 @app.on_event("shutdown")
 def shutdown_event():
     logger.info("NOVARIC Backend stopped.")
+
 
 # ================================================================
 # LOCAL / CLOUD RUN ENTRYPOINT

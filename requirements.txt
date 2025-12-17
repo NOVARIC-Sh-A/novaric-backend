@@ -16,6 +16,9 @@ tqdm==4.66.1
 beautifulsoup4==4.12.2
 feedparser==6.0.12
 
+# RSS generation (for /rss.xml)
+feedgen==1.0.0
+
 google-cloud-storage==2.14.0
 google-cloud-scheduler==2.12.0
 

@@ -43,6 +43,14 @@ from config.rss_feeds import (
 )
 
 # ================================================================
+# NER (NOVARIC ECOSYSTEM RATING)
+# ================================================================
+try:
+    from services.ner_engine import compute_ner
+except Exception:
+    compute_ner = None
+
+# ================================================================
 # LOGGING
 # ================================================================
 logging.basicConfig(
@@ -121,6 +129,11 @@ class NewsArticle(BaseModel):
     category: Optional[str] = None
     originalArticleUrl: Optional[str] = None
 
+    # NER (backend-authoritative)
+    ecosystemRating: Optional[int] = None
+    nerVersion: Optional[str] = None
+    nerBreakdown: Optional[Dict[str, object]] = None
+
 
 # ================================================================
 # HELPERS
@@ -144,20 +157,13 @@ def infer_source_name(parsed_feed: object, feed_url: str) -> str:
 
 
 def extract_image(entry: object) -> str:
-    try:
-        media = getattr(entry, "media_content", None)
-        if media and media[0].get("url"):
-            return media[0]["url"]
-    except Exception:
-        pass
-
-    try:
-        thumbs = getattr(entry, "media_thumbnail", None)
-        if thumbs and thumbs[0].get("url"):
-            return thumbs[0]["url"]
-    except Exception:
-        pass
-
+    for attr in ("media_content", "media_thumbnail"):
+        try:
+            media = getattr(entry, attr, None)
+            if media and media[0].get("url"):
+                return media[0]["url"]
+        except Exception:
+            pass
     return ""
 
 
@@ -196,7 +202,7 @@ def health_probe():
 
 
 # ================================================================
-# CORE NEWS PIPELINE (PURE FUNCTION – NO FASTAPI)
+# CORE NEWS PIPELINE (PURE FUNCTION)
 # ================================================================
 async def collect_news_articles(category: str) -> List[NewsArticle]:
     key = (category or "all").strip().lower()
@@ -223,19 +229,64 @@ async def collect_news_articles(category: str) -> List[NewsArticle]:
             source_type = infer_source_type(url)
             source_name = infer_source_name(parsed, url)
 
-            for entry in (parsed.entries or [])[:max_entries_per_feed]:
+            entries = (parsed.entries or [])[:max_entries_per_feed]
+
+            # Deterministic peer pool for CSC
+            peer_titles = [
+                (e.get("title") or "").strip()
+                for e in entries
+                if (e.get("title") or "").strip()
+            ]
+
+            for entry in entries:
+                if len(articles) >= max_total_articles:
+                    break
+
+                title = (entry.get("title") or "No Title").strip()
+                summary = entry.get("summary") or ""
+                published_ts = entry.get("published", entry.get("updated", "")) or ""
+
+                ecosystem_rating = None
+                ner_version = None
+                ner_breakdown = None
+
+                if compute_ner:
+                    try:
+                        ner = compute_ner(
+                            feed_url=url,
+                            source_type=source_type,
+                            title=title,
+                            summary=summary,
+                            published_ts=published_ts,
+                            peer_titles=[pt for pt in peer_titles if pt != title],
+                        )
+                        ecosystem_rating = ner.ecosystemRating
+                        ner_version = ner.nerVersion
+                        ner_breakdown = {
+                            "SRS": ner.breakdown.SRS,
+                            "CIS": ner.breakdown.CIS,
+                            "CSC": ner.breakdown.CSC,
+                            "TRF": ner.breakdown.TRF,
+                            "ECM": ner.breakdown.ECM,
+                        }
+                    except Exception as e:
+                        logger.warning(f"NER skipped: {e}")
+
                 articles.append(
                     NewsArticle(
                         id=str(entry.get("id") or entry.get("link") or ""),
-                        title=(entry.get("title") or "No Title").strip(),
-                        content=(entry.get("summary", "")[:300] + "..."),
+                        title=title,
+                        content=(summary[:300] + "...") if summary else "",
                         imageUrl=extract_image(entry),
-                        timestamp=entry.get("published", entry.get("updated", "")),
+                        timestamp=published_ts,
                         feedUrl=url,
                         sourceName=source_name,
                         sourceType=source_type,
                         category=key,
                         originalArticleUrl=entry.get("link"),
+                        ecosystemRating=ecosystem_rating,
+                        nerVersion=ner_version,
+                        nerBreakdown=ner_breakdown,
                     )
                 )
 
@@ -255,7 +306,7 @@ async def get_news(category: str = Query(default="all")):
 
 
 # ================================================================
-# RSS FEED (CANONICAL BACKEND DOMAIN)
+# RSS FEED
 # ================================================================
 @app.get("/rss.xml", include_in_schema=False)
 async def rss_feed(category: str = Query(default="all")):
@@ -265,10 +316,7 @@ async def rss_feed(category: str = Query(default="all")):
     fg.id("https://api.media.novaric.al/rss.xml")
     fg.title("NOVARIC® Media")
     fg.link(href="https://media.novaric.al", rel="alternate")
-    fg.link(
-        href=f"https://api.media.novaric.al/rss.xml?category={category}",
-        rel="self",
-    )
+    fg.link(href=f"https://api.media.novaric.al/rss.xml?category={category}", rel="self")
     fg.description("AI-powered media intelligence from NOVARIC®")
     fg.language("en")
     fg.updated(datetime.now(timezone.utc))
@@ -281,6 +329,12 @@ async def rss_feed(category: str = Query(default="all")):
         fe.description(article.content)
         fe.author({"name": article.sourceName})
         fe.category(term=article.sourceType)
+
+        if article.ecosystemRating is not None:
+            fe.rss_entry()["extension_elements"] = [
+                ("novaric:ecosystemRating", str(article.ecosystemRating)),
+                ("novaric:nerVersion", str(article.nerVersion or "")),
+            ]
 
         try:
             fe.published(datetime.fromisoformat(article.timestamp))
@@ -298,13 +352,13 @@ async def rss_feed(category: str = Query(default="all")):
 
 
 # ================================================================
-# REGISTER ROUTERS
+# ROUTERS
 # ================================================================
 app.include_router(paragon_router)
 app.include_router(enrichment_router)
 
 # ================================================================
-# STARTUP / SHUTDOWN
+# LIFECYCLE
 # ================================================================
 @app.on_event("startup")
 def startup_event():
@@ -314,17 +368,3 @@ def startup_event():
 @app.on_event("shutdown")
 def shutdown_event():
     logger.info("NOVARIC Backend stopped.")
-
-
-# ================================================================
-# ENTRYPOINT
-# ================================================================
-if __name__ == "__main__":
-    import uvicorn
-
-    uvicorn.run(
-        "main:app",
-        host="0.0.0.0",
-        port=int(os.getenv("PORT", 8080)),
-        reload=False,
-    )

@@ -34,7 +34,7 @@ from paragon_api import router as paragon_router
 from routers.profile_enrichment import router as enrichment_router
 
 # ================================================================
-# FEED REGISTRY (CATEGORY-AWARE)
+# FEED REGISTRY
 # ================================================================
 from config.rss_feeds import (
     get_feeds_for_news_category,
@@ -47,8 +47,11 @@ from config.rss_feeds import (
 # ================================================================
 try:
     from services.ner_engine import compute_ner
+    from services.ner_repository import get_snapshot, save_snapshot
 except Exception:
     compute_ner = None
+    get_snapshot = None
+    save_snapshot = None
 
 # ================================================================
 # LOGGING
@@ -60,7 +63,7 @@ logging.basicConfig(
 logger = logging.getLogger("novaric-backend")
 
 # ================================================================
-# SIMPLE IN-MEMORY TTL CACHE (NEWS)
+# SIMPLE IN-MEMORY TTL CACHE
 # ================================================================
 _NEWS_CACHE: Dict[str, Dict[str, object]] = {}
 _NEWS_CACHE_TTL_SECONDS = int(os.getenv("NEWS_CACHE_TTL_SECONDS", "60"))
@@ -129,7 +132,6 @@ class NewsArticle(BaseModel):
     category: Optional[str] = None
     originalArticleUrl: Optional[str] = None
 
-    # NER (backend-authoritative)
     ecosystemRating: Optional[int] = None
     nerVersion: Optional[str] = None
     nerBreakdown: Optional[Dict[str, object]] = None
@@ -148,7 +150,7 @@ def infer_source_type(feed_url: str) -> SourceType:
 
 def infer_source_name(parsed_feed: object, feed_url: str) -> str:
     try:
-        title = getattr(getattr(parsed_feed, "feed", None), "title", None)
+        title = getattr(parsed_feed.feed, "title", None)
         if title:
             return str(title).strip()
     except Exception:
@@ -228,10 +230,8 @@ async def collect_news_articles(category: str) -> List[NewsArticle]:
 
             source_type = infer_source_type(url)
             source_name = infer_source_name(parsed, url)
-
             entries = (parsed.entries or [])[:max_entries_per_feed]
 
-            # Deterministic peer pool for CSC
             peer_titles = [
                 (e.get("title") or "").strip()
                 for e in entries
@@ -239,9 +239,7 @@ async def collect_news_articles(category: str) -> List[NewsArticle]:
             ]
 
             for entry in entries:
-                if len(articles) >= max_total_articles:
-                    break
-
+                article_id = str(entry.get("id") or entry.get("link") or "")
                 title = (entry.get("title") or "No Title").strip()
                 summary = entry.get("summary") or ""
                 published_ts = entry.get("published", entry.get("updated", "")) or ""
@@ -250,7 +248,16 @@ async def collect_news_articles(category: str) -> List[NewsArticle]:
                 ner_version = None
                 ner_breakdown = None
 
-                if compute_ner:
+                # --------------------------------------------
+                # IMMUTABLE NER SNAPSHOT LOGIC
+                # --------------------------------------------
+                snapshot = get_snapshot(article_id) if get_snapshot else None
+
+                if snapshot:
+                    ecosystem_rating = snapshot.ecosystemRating
+                    ner_version = snapshot.nerVersion
+                    ner_breakdown = snapshot.breakdown.__dict__
+                elif compute_ner and save_snapshot:
                     try:
                         ner = compute_ner(
                             feed_url=url,
@@ -262,19 +269,20 @@ async def collect_news_articles(category: str) -> List[NewsArticle]:
                         )
                         ecosystem_rating = ner.ecosystemRating
                         ner_version = ner.nerVersion
-                        ner_breakdown = {
-                            "SRS": ner.breakdown.SRS,
-                            "CIS": ner.breakdown.CIS,
-                            "CSC": ner.breakdown.CSC,
-                            "TRF": ner.breakdown.TRF,
-                            "ECM": ner.breakdown.ECM,
-                        }
+                        ner_breakdown = ner.breakdown.__dict__
+
+                        save_snapshot(
+                            article_id=article_id,
+                            feed_url=url,
+                            published_ts=published_ts,
+                            ner=ner,
+                        )
                     except Exception as e:
                         logger.warning(f"NER skipped: {e}")
 
                 articles.append(
                     NewsArticle(
-                        id=str(entry.get("id") or entry.get("link") or ""),
+                        id=article_id,
                         title=title,
                         content=(summary[:300] + "...") if summary else "",
                         imageUrl=extract_image(entry),

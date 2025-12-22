@@ -59,7 +59,7 @@ except Exception:
 # ================================================================
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s"
+    format="%(asctime)s | %(levelname)s | %(message)s",
 )
 logger = logging.getLogger("novaric-backend")
 
@@ -67,7 +67,7 @@ logger = logging.getLogger("novaric-backend")
 # SIMPLE IN-MEMORY TTL CACHE
 # ================================================================
 _NEWS_CACHE: Dict[str, Dict[str, object]] = {}
-_NEWS_CACHE_TTL_SECONDS = int(os.getenv("NEWS_CACHE_TTL_SECONDS", "300"))  # 5 min
+_NEWS_CACHE_TTL_SECONDS = int(os.getenv("NEWS_CACHE_TTL_SECONDS", "300"))  # 5 minutes
 
 # ================================================================
 # FASTAPI APP
@@ -205,7 +205,7 @@ def health_probe():
 
 
 # ================================================================
-# CORE NEWS PIPELINE (PURE FUNCTION)
+# CORE NEWS PIPELINE
 # ================================================================
 def _parse_feed(url: str):
     try:
@@ -227,90 +227,91 @@ async def collect_news_articles(category: str) -> List[NewsArticle]:
     feeds = get_feeds_for_news_category(key) or []
     articles: List[NewsArticle] = []
 
-    max_entries_per_feed = int(os.getenv("NEWS_MAX_ENTRIES_PER_FEED", "7"))
-    max_total_articles = int(os.getenv("NEWS_MAX_TOTAL_ARTICLES", "200"))
-
     with ThreadPoolExecutor(max_workers=6) as executor:
         futures = [executor.submit(_parse_feed, url) for url in feeds]
 
         for future in as_completed(futures):
-            if len(articles) >= max_total_articles:
-                break
-
             result = future.result()
             if not result:
                 continue
 
             url, parsed = result
+            entries = parsed.entries or []
+            if not entries:
+                continue
+
+            # --------------------------------------------
+            # Select exactly ONE most recent article
+            # --------------------------------------------
+            def _entry_ts(e):
+                try:
+                    ts = e.get("published_parsed") or e.get("updated_parsed")
+                    if ts:
+                        return time.mktime(ts)
+                except Exception:
+                    pass
+                return 0.0
+
+            entry = sorted(entries, key=_entry_ts, reverse=True)[0]
+
+            article_id = str(entry.get("id") or entry.get("link") or "")
+            title = (entry.get("title") or "No Title").strip()
+            summary = entry.get("summary") or ""
+            published_ts = entry.get("published", entry.get("updated", "")) or ""
+
             source_type = infer_source_type(url)
             source_name = infer_source_name(parsed, url)
-            entries = (parsed.entries or [])[:max_entries_per_feed]
 
-            peer_titles = [
-                (e.get("title") or "").strip()
-                for e in entries
-                if (e.get("title") or "").strip()
-            ]
+            ecosystem_rating = None
+            ner_version = None
+            ner_breakdown = None
 
-            for entry in entries:
-                if len(articles) >= max_total_articles:
-                    break
+            snapshot = get_snapshot(article_id) if get_snapshot else None
 
-                article_id = str(entry.get("id") or entry.get("link") or "")
-                title = (entry.get("title") or "No Title").strip()
-                summary = entry.get("summary") or ""
-                published_ts = entry.get("published", entry.get("updated", "")) or ""
-
-                ecosystem_rating = None
-                ner_version = None
-                ner_breakdown = None
-
-                snapshot = get_snapshot(article_id) if get_snapshot else None
-
-                if snapshot:
-                    ecosystem_rating = snapshot.ecosystemRating
-                    ner_version = snapshot.nerVersion
-                    ner_breakdown = snapshot.breakdown
-                elif compute_ner and save_snapshot:
-                    try:
-                        ner = compute_ner(
-                            feed_url=url,
-                            source_type=source_type,
-                            title=title,
-                            summary=summary,
-                            published_ts=published_ts,
-                            peer_titles=[pt for pt in peer_titles if pt != title],
-                        )
-                        ecosystem_rating = ner.ecosystemRating
-                        ner_version = ner.nerVersion
-                        ner_breakdown = ner.breakdown.__dict__
-
-                        save_snapshot(
-                            article_id=article_id,
-                            feed_url=url,
-                            published_ts=published_ts,
-                            ner=ner,
-                        )
-                    except Exception as e:
-                        logger.warning(f"NER skipped: {e}")
-
-                articles.append(
-                    NewsArticle(
-                        id=article_id,
+            if snapshot:
+                ecosystem_rating = snapshot.ecosystemRating
+                ner_version = snapshot.nerVersion
+                ner_breakdown = snapshot.breakdown.__dict__
+            elif compute_ner and save_snapshot:
+                try:
+                    ner = compute_ner(
+                        feed_url=url,
+                        source_type=source_type,
                         title=title,
-                        content=(summary[:300] + "...") if summary else "",
-                        imageUrl=extract_image(entry),
-                        timestamp=published_ts,
-                        feedUrl=url,
-                        sourceName=source_name,
-                        sourceType=source_type,
-                        category=key,
-                        originalArticleUrl=entry.get("link"),
-                        ecosystemRating=ecosystem_rating,
-                        nerVersion=ner_version,
-                        nerBreakdown=ner_breakdown,
+                        summary=summary,
+                        published_ts=published_ts,
+                        peer_titles=[],
                     )
+                    ecosystem_rating = ner.ecosystemRating
+                    ner_version = ner.nerVersion
+                    ner_breakdown = ner.breakdown.__dict__
+
+                    save_snapshot(
+                        article_id=article_id,
+                        feed_url=url,
+                        published_ts=published_ts,
+                        ner=ner,
+                    )
+                except Exception as e:
+                    logger.warning(f"NER skipped: {e}")
+
+            articles.append(
+                NewsArticle(
+                    id=article_id,
+                    title=title,
+                    content=(summary[:300] + "...") if summary else "",
+                    imageUrl=extract_image(entry),
+                    timestamp=published_ts,
+                    feedUrl=url,
+                    sourceName=source_name,
+                    sourceType=source_type,
+                    category=key,
+                    originalArticleUrl=entry.get("link"),
+                    ecosystemRating=ecosystem_rating,
+                    nerVersion=ner_version,
+                    nerBreakdown=ner_breakdown,
                 )
+            )
 
     cache_set(key, articles)
     return articles

@@ -11,6 +11,7 @@ import logging
 from typing import List, Dict, Optional, Literal
 from urllib.parse import urlparse
 from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import feedparser
 from feedgen.feed import FeedGenerator
@@ -66,7 +67,7 @@ logger = logging.getLogger("novaric-backend")
 # SIMPLE IN-MEMORY TTL CACHE
 # ================================================================
 _NEWS_CACHE: Dict[str, Dict[str, object]] = {}
-_NEWS_CACHE_TTL_SECONDS = int(os.getenv("NEWS_CACHE_TTL_SECONDS", "60"))
+_NEWS_CACHE_TTL_SECONDS = int(os.getenv("NEWS_CACHE_TTL_SECONDS", "300"))  # 5 min
 
 # ================================================================
 # FASTAPI APP
@@ -206,6 +207,16 @@ def health_probe():
 # ================================================================
 # CORE NEWS PIPELINE (PURE FUNCTION)
 # ================================================================
+def _parse_feed(url: str):
+    try:
+        parsed = feedparser.parse(url)
+        if getattr(parsed, "bozo", False):
+            return None
+        return url, parsed
+    except Exception:
+        return None
+
+
 async def collect_news_articles(category: str) -> List[NewsArticle]:
     key = (category or "all").strip().lower()
 
@@ -219,15 +230,18 @@ async def collect_news_articles(category: str) -> List[NewsArticle]:
     max_entries_per_feed = int(os.getenv("NEWS_MAX_ENTRIES_PER_FEED", "7"))
     max_total_articles = int(os.getenv("NEWS_MAX_TOTAL_ARTICLES", "200"))
 
-    for url in feeds:
-        if len(articles) >= max_total_articles:
-            break
+    with ThreadPoolExecutor(max_workers=6) as executor:
+        futures = [executor.submit(_parse_feed, url) for url in feeds]
 
-        try:
-            parsed = feedparser.parse(url)
-            if getattr(parsed, "bozo", False):
+        for future in as_completed(futures):
+            if len(articles) >= max_total_articles:
+                break
+
+            result = future.result()
+            if not result:
                 continue
 
+            url, parsed = result
             source_type = infer_source_type(url)
             source_name = infer_source_name(parsed, url)
             entries = (parsed.entries or [])[:max_entries_per_feed]
@@ -239,6 +253,9 @@ async def collect_news_articles(category: str) -> List[NewsArticle]:
             ]
 
             for entry in entries:
+                if len(articles) >= max_total_articles:
+                    break
+
                 article_id = str(entry.get("id") or entry.get("link") or "")
                 title = (entry.get("title") or "No Title").strip()
                 summary = entry.get("summary") or ""
@@ -248,15 +265,12 @@ async def collect_news_articles(category: str) -> List[NewsArticle]:
                 ner_version = None
                 ner_breakdown = None
 
-                # --------------------------------------------
-                # IMMUTABLE NER SNAPSHOT LOGIC
-                # --------------------------------------------
                 snapshot = get_snapshot(article_id) if get_snapshot else None
 
                 if snapshot:
                     ecosystem_rating = snapshot.ecosystemRating
                     ner_version = snapshot.nerVersion
-                    ner_breakdown = snapshot.breakdown.__dict__
+                    ner_breakdown = snapshot.breakdown
                 elif compute_ner and save_snapshot:
                     try:
                         ner = compute_ner(
@@ -297,9 +311,6 @@ async def collect_news_articles(category: str) -> List[NewsArticle]:
                         nerBreakdown=ner_breakdown,
                     )
                 )
-
-        except Exception as e:
-            logger.error(f"Feed error [{url}]: {e}")
 
     cache_set(key, articles)
     return articles

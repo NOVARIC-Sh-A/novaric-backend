@@ -3,7 +3,7 @@ paragon_api.py
 
 PARAGON® Analytics API
 ────────────────────────────────────────
-ETL:
+ETL pipeline:
 - metric_loader.load_metrics_for
 - scoring_engine.score_metrics
 - trend_engine.record_paragon_snapshot
@@ -25,9 +25,10 @@ from etl.trend_engine import record_paragon_snapshot
 router = APIRouter(prefix="/api/paragon", tags=["PARAGON Analytics"])
 
 
-# ============================================================
-# Safe Supabase fetch
-# ============================================================
+# =====================================================================
+# Supabase safe fetch
+# =====================================================================
+
 def _fetch_safe(table: str, params: Dict[str, Any]) -> List[Dict[str, Any]]:
     try:
         return _get(table, params) or []
@@ -36,9 +37,30 @@ def _fetch_safe(table: str, params: Dict[str, Any]) -> List[Dict[str, Any]]:
         return []
 
 
-# ============================================================
-# Normalize DB row
-# ============================================================
+# =====================================================================
+# Row normalization (schema-resilient)
+# =====================================================================
+
+def _extract_score(row: Dict[str, Any]) -> int:
+    """
+    Extracts the score regardless of column naming.
+    """
+    for key in (
+        "overall_score",
+        "score",
+        "paragon_score",
+        "paragon",
+        "value",
+        "overall",
+    ):
+        if key in row and row[key] is not None:
+            try:
+                return int(row[key])
+            except Exception:
+                pass
+    return 0
+
+
 def _normalize_row(row: Dict[str, Any]) -> Dict[str, Any]:
     dims = row.get("dimensions_json") or []
     if not isinstance(dims, list):
@@ -46,15 +68,16 @@ def _normalize_row(row: Dict[str, Any]) -> Dict[str, Any]:
 
     return {
         **row,
-        "overall_score": int(row.get("overall_score", 0) or 0),
+        "overall_score": _extract_score(row),
         "dimensions": dims,
         "dimensions_json": dims,
     }
 
 
-# ============================================================
+# =====================================================================
 # 1. Latest scores
-# ============================================================
+# =====================================================================
+
 @router.get("/latest")
 def get_latest_scores(limit: int = 500):
     rows = _fetch_safe(
@@ -75,15 +98,17 @@ def get_latest_score_for(politician_id: int):
             "limit": 1,
         },
     )
+
     if not rows:
         raise HTTPException(status_code=404, detail="Politician score not found")
 
     return _normalize_row(rows[0])
 
 
-# ============================================================
-# 2. Trends
-# ============================================================
+# =====================================================================
+# 2. Trend endpoints
+# =====================================================================
+
 @router.get("/trends/latest")
 def get_latest_trends(limit: int = 500):
     rows = _fetch_safe(
@@ -109,9 +134,10 @@ def get_trend_history(politician_id: int, limit: int = 50):
     return {"count": len(data), "results": data}
 
 
-# ============================================================
-# 3. Delta helpers
-# ============================================================
+# =====================================================================
+# 3. Delta computation
+# =====================================================================
+
 def _compute_deltas(history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     grouped: Dict[int, List[Dict[str, Any]]] = {}
 
@@ -120,26 +146,32 @@ def _compute_deltas(history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         if isinstance(pid, int):
             grouped.setdefault(pid, []).append(row)
 
-    results = []
+    deltas: List[Dict[str, Any]] = []
 
     for pid, rows in grouped.items():
         if len(rows) < 2:
             continue
 
-        rows = sorted(rows, key=lambda r: r.get("calculated_at") or "", reverse=True)
+        rows = sorted(
+            rows,
+            key=lambda r: r.get("calculated_at") or "",
+            reverse=True,
+        )
 
-        new_score = int(rows[0].get("overall_score", 0) or 0)
-        prev_score = int(rows[1].get("overall_score", 0) or 0)
+        new_score = _extract_score(rows[0])
+        prev_score = _extract_score(rows[1])
 
-        results.append({
-            "politician_id": pid,
-            "name": (rows[0].get("politicians") or {}).get("name"),
-            "new_score": new_score,
-            "previous_score": prev_score,
-            "delta": new_score - prev_score,
-        })
+        deltas.append(
+            {
+                "politician_id": pid,
+                "name": (rows[0].get("politicians") or {}).get("name"),
+                "new_score": new_score,
+                "previous_score": prev_score,
+                "delta": new_score - prev_score,
+            }
+        )
 
-    return results
+    return deltas
 
 
 @router.get("/trends/top-risers")
@@ -179,8 +211,8 @@ def get_momentum(politician_id: int):
     if len(rows) < 2:
         return {"politician_id": politician_id, "delta": 0}
 
-    new_score = int(rows[0].get("overall_score", 0) or 0)
-    prev_score = int(rows[1].get("overall_score", 0) or 0)
+    new_score = _extract_score(rows[0])
+    prev_score = _extract_score(rows[1])
 
     return {
         "politician_id": politician_id,
@@ -191,9 +223,10 @@ def get_momentum(politician_id: int):
     }
 
 
-# ============================================================
+# =====================================================================
 # 4. Dashboard
-# ============================================================
+# =====================================================================
+
 @router.get("/dashboard")
 def get_paragon_dashboard(limit: int = 10, scan_limit: int = 500):
     latest = _fetch_safe(
@@ -212,15 +245,23 @@ def get_paragon_dashboard(limit: int = 10, scan_limit: int = 500):
 
     return {
         "latestScores": latest[:limit],
-        "topRisers": sorted([d for d in deltas if d["delta"] > 0], key=lambda x: x["delta"], reverse=True)[:limit],
-        "topFallers": sorted([d for d in deltas if d["delta"] < 0], key=lambda x: x["delta"])[:limit],
+        "topRisers": sorted(
+            [d for d in deltas if d["delta"] > 0],
+            key=lambda x: x["delta"],
+            reverse=True,
+        )[:limit],
+        "topFallers": sorted(
+            [d for d in deltas if d["delta"] < 0],
+            key=lambda x: x["delta"],
+        )[:limit],
         "recentTrends": trends[:200],
     }
 
 
-# ============================================================
-# 5. Recomputation (SAFE MODE)
-# ============================================================
+# =====================================================================
+# 5. Recomputation (SAFE MODE only)
+# =====================================================================
+
 @router.post("/recompute/{politician_id}")
 def recompute_paragon_score(politician_id: int):
     try:

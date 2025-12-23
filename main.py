@@ -9,7 +9,7 @@ import os
 import time
 import logging
 import re
-from typing import List, Dict, Optional, Literal, Tuple
+from typing import List, Dict, Optional, Literal
 from urllib.parse import urlparse
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -68,7 +68,7 @@ logger = logging.getLogger("novaric-backend")
 # SIMPLE IN-MEMORY TTL CACHE
 # ================================================================
 _NEWS_CACHE: Dict[str, Dict[str, object]] = {}
-_NEWS_CACHE_TTL_SECONDS = int(os.getenv("NEWS_CACHE_TTL_SECONDS", "300"))  # 5 minutes
+_NEWS_CACHE_TTL_SECONDS = int(os.getenv("NEWS_CACHE_TTL_SECONDS", "300"))
 
 # ================================================================
 # FASTAPI APP
@@ -171,7 +171,7 @@ def extract_image(entry: object) -> str:
     return ""
 
 
-def cache_get(key: str) -> Optional[List[NewsArticle]]:
+def cache_get(key: str):
     blob = _NEWS_CACHE.get(key)
     if not blob:
         return None
@@ -180,14 +180,11 @@ def cache_get(key: str) -> Optional[List[NewsArticle]]:
     return blob["data"]
 
 
-def cache_set(key: str, data: List[NewsArticle]) -> None:
+def cache_set(key: str, data):
     _NEWS_CACHE[key] = {"ts": time.time(), "data": data}
 
 
 def _safe_epoch_from_entry(entry: object) -> float:
-    """
-    feedparser provides published_parsed/updated_parsed as time.struct_time
-    """
     try:
         ts = entry.get("published_parsed") or entry.get("updated_parsed")
         if ts:
@@ -197,67 +194,37 @@ def _safe_epoch_from_entry(entry: object) -> float:
     return 0.0
 
 
-def _normalize_title_for_dedupe(title: str) -> str:
+def _normalize_title(title: str) -> str:
     t = (title or "").lower().strip()
     t = re.sub(r"\s+", " ", t)
-    t = re.sub(r"[^\w\sÀ-ž]", "", t)  # keep letters/numbers (incl. Albanian chars)
-    return t[:180]  # cap for stable keys
+    t = re.sub(r"[^\w\sÀ-ž]", "", t)
+    return t[:180]
 
 
 def _dedupe_key(article: NewsArticle) -> str:
-    # Prefer URL-based identity (strongest)
-    url = (article.originalArticleUrl or "").strip()
-    if url:
-        return f"url:{url}"
-
-    # Next best: id if it's a URL-like or stable id
-    aid = (article.id or "").strip()
-    if aid:
-        return f"id:{aid}"
-
-    # Fallback: normalized title fingerprint
-    return f"title:{_normalize_title_for_dedupe(article.title)}"
+    if article.originalArticleUrl:
+        return f"url:{article.originalArticleUrl}"
+    if article.id:
+        return f"id:{article.id}"
+    return f"title:{_normalize_title(article.title)}"
 
 
-def _iso_or_rfc822_to_epoch(ts: str) -> float:
-    """
-    Your feeds return mixed timestamp formats.
-    - Try ISO first
-    - Fallback returns 0.0
-    """
-    if not ts:
-        return 0.0
+def _epoch(ts: str) -> float:
     try:
         dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
         return dt.timestamp()
     except Exception:
         return 0.0
 
 
 def _choose_better(a: NewsArticle, b: NewsArticle) -> NewsArticle:
-    """
-    Deterministic winner selection between duplicates.
-    Priority:
-      1) higher ecosystemRating
-      2) newer timestamp
-      3) stable fallback by feedUrl then id
-    """
-    ar = a.ecosystemRating if a.ecosystemRating is not None else -1
-    br = b.ecosystemRating if b.ecosystemRating is not None else -1
+    ar = a.ecosystemRating or -1
+    br = b.ecosystemRating or -1
     if br != ar:
         return b if br > ar else a
-
-    at = _iso_or_rfc822_to_epoch(a.timestamp)
-    bt = _iso_or_rfc822_to_epoch(b.timestamp)
-    if bt != at:
-        return b if bt > at else a
-
-    # stable fallback
-    if (b.feedUrl, b.id) < (a.feedUrl, a.id):
-        return b
-    return a
+    if _epoch(b.timestamp) != _epoch(a.timestamp):
+        return b if _epoch(b.timestamp) > _epoch(a.timestamp) else a
+    return b if (b.feedUrl, b.id) < (a.feedUrl, a.id) else a
 
 
 # ================================================================
@@ -296,7 +263,6 @@ def _parse_feed(url: str):
 
 async def collect_news_articles(category: str) -> List[NewsArticle]:
     key = (category or "all").strip().lower()
-
     cached = cache_get(key)
     if cached is not None:
         return cached
@@ -304,16 +270,10 @@ async def collect_news_articles(category: str) -> List[NewsArticle]:
     feeds = get_feeds_for_news_category(key) or []
     articles: List[NewsArticle] = []
 
-    # (Optional safety cap; Phase 1 already limits to 1/feed)
-    max_total_articles = int(os.getenv("NEWS_MAX_TOTAL_ARTICLES", "200"))
-
     with ThreadPoolExecutor(max_workers=6) as executor:
         futures = [executor.submit(_parse_feed, url) for url in feeds]
 
         for future in as_completed(futures):
-            if len(articles) >= max_total_articles:
-                break
-
             result = future.result()
             if not result:
                 continue
@@ -323,9 +283,6 @@ async def collect_news_articles(category: str) -> List[NewsArticle]:
             if not entries:
                 continue
 
-            # --------------------------------------------
-            # Phase 1: exactly ONE per feed (most recent)
-            # --------------------------------------------
             entry = sorted(entries, key=_safe_epoch_from_entry, reverse=True)[0]
 
             article_id = str(entry.get("id") or entry.get("link") or "")
@@ -387,27 +344,14 @@ async def collect_news_articles(category: str) -> List[NewsArticle]:
                 )
             )
 
-    # --------------------------------------------
-    # Phase 2: cross-feed duplicate suppression
-    # --------------------------------------------
     deduped: Dict[str, NewsArticle] = {}
     for a in articles:
         k = _dedupe_key(a)
-        if k not in deduped:
-            deduped[k] = a
-        else:
-            deduped[k] = _choose_better(deduped[k], a)
+        deduped[k] = a if k not in deduped else _choose_better(deduped[k], a)
 
-    final_articles = list(deduped.values())
-
-    # Stable ordering for UI (best first)
-    final_articles.sort(
-        key=lambda x: (
-            -(x.ecosystemRating if x.ecosystemRating is not None else -1),
-            -_iso_or_rfc822_to_epoch(x.timestamp),
-            x.feedUrl,
-            x.id,
-        )
+    final_articles = sorted(
+        deduped.values(),
+        key=lambda x: (-(x.ecosystemRating or -1), -_epoch(x.timestamp)),
     )
 
     cache_set(key, final_articles)
@@ -452,11 +396,6 @@ async def rss_feed(category: str = Query(default="all")):
                 ("novaric:ecosystemRating", str(article.ecosystemRating)),
                 ("novaric:nerVersion", str(article.nerVersion or "")),
             ]
-
-        try:
-            fe.published(datetime.fromisoformat(article.timestamp))
-        except Exception:
-            pass
 
         if article.imageUrl:
             fe.enclosure(article.imageUrl, 0, "image/jpeg")

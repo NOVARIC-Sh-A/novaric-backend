@@ -1,182 +1,104 @@
 """
 paragon_api.py
 
-PARAGON® Analytics API:
-- Latest scores
-- Trends
-- Risers / Fallers
+PARAGON® Analytics API
+────────────────────────────────────────
+- Latest live scores (from snapshots)
+- Single politician score
+- Risers / Fallers (derived deltas)
 - Momentum
-- Dashboard Aggregator
-- Real-time recomputation (NEW)
+- Dashboard aggregation
+- Real-time recomputation (LIVE)
 """
 
+from typing import Dict, Any, List
+from datetime import datetime
 from fastapi import APIRouter, HTTPException
-from typing import List, Dict, Any
 
-from utils.supabase_client import _get
-from etl.metric_loader import load_metrics_for
-from etl.scoring_engine import score_metrics
-from etl.trend_engine import record_paragon_snapshot
-
-
-# Initialize PARAGON Engine early
-try:
-    print("✔ PARAGON Engine: metric_loader + scoring_engine active")
-except Exception as e:
-    print(f"✖ PARAGON Engine initialization failed: {e}")
+from utils.supabase_client import supabase
+from services.paragon_live import (
+    compute_and_snapshot_paragon,
+    recompute_all_paragon,
+)
+from services.paragon_repository import get_paragon_snapshot
 
 
 router = APIRouter(
     prefix="/api/paragon",
-    tags=["PARAGON Analytics"]
+    tags=["PARAGON Analytics"],
 )
 
 
-# =====================================================================
-# Safe getter wrapper
-# =====================================================================
-def fetch_safe(table: str, params: Dict[str, Any]):
-    try:
-        return _get(table, params)
-    except Exception as e:
-        print(f"[paragon_api] Supabase fetch failed ({table}): {e}")
-        return []
+# ============================================================
+# Helpers
+# ============================================================
 
-
-# =====================================================================
-# Helper: Normalize DB row → frontend-ready format
-# =====================================================================
-def _normalize_paragon_row(row: Dict[str, Any]) -> Dict[str, Any]:
+def _normalize_snapshot(row: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Ensures all endpoints return consistent shape:
-
-    {
-        "politician_id": int,
-        "overall_score": int,
-        "calculated_at": "...",
-        "dimensions": [...],          # always list of {dimension, score}
-        "dimensions_json": [...],     # raw from DB for advanced consumers
-        "politicians": {...}          # metadata
-    }
+    Normalizes snapshot row → frontend-ready shape.
     """
+    breakdown = row.get("breakdown") or []
 
-    # Pull stored JSONB field (may be NULL)
-    dims = row.get("dimensions_json") or []
-
-    # Convert into old structure for FE charts
     dimensions = [
         {
             "dimension": d.get("dimension"),
             "score": int(d.get("score", 0)),
         }
-        for d in dims
+        for d in breakdown
+        if isinstance(d, dict)
     ]
 
     return {
-        **row,
+        "politician_id": row.get("politician_id"),
+        "overall_score": int(row.get("score", 0)),
+        "calculated_at": row.get("computed_at"),
         "dimensions": dimensions,
-        "dimensions_json": dims,
+        "dimensions_json": breakdown,
+        "version": row.get("version"),
     }
 
 
-# =====================================================================
-# 1. Latest Live Scores
-# =====================================================================
-@router.get("/latest")
-def get_latest_scores():
-    data = fetch_safe(
-        "paragon_scores",
-        {"select": "*,politicians(*)", "order": "overall_score.desc"}
+def _fetch_all_snapshots(limit: int = 500) -> List[Dict[str, Any]]:
+    res = (
+        supabase
+        .table("paragon_snapshots")
+        .select("*")
+        .order("computed_at", desc=True)
+        .limit(limit)
+        .execute()
     )
-
-    normalized = [_normalize_paragon_row(x) for x in data]
-
-    return {
-        "count": len(normalized),
-        "results": normalized
-    }
+    return res.data or []
 
 
-@router.get("/latest/{politician_id}")
-def get_latest_score_for(politician_id: int):
-    data = fetch_safe(
-        "paragon_scores",
-        {
-            "select": "*,politicians(*)",
-            "politician_id": f"eq.{politician_id}",
-            "limit": 1
-        }
-    )
+def _compute_deltas(rows: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    """
+    Computes score deltas per politician from snapshots.
+    """
+    grouped: Dict[str, List[Dict[str, Any]]] = {}
 
-    if not data:
-        raise HTTPException(404, "Politician score not found")
-
-    return _normalize_paragon_row(data[0])
-
-
-# =====================================================================
-# 2. Global Trend History
-# =====================================================================
-@router.get("/trends/latest")
-def get_latest_trends():
-    data = fetch_safe(
-        "paragon_trends",
-        {
-            "select": "*,politicians(*)",
-            "order": "calculated_at.desc",
-            "limit": 500
-        }
-    )
-
-    normalized = [_normalize_paragon_row(x) for x in data]
-
-    return {"count": len(normalized), "results": normalized}
-
-
-@router.get("/trends/history/{politician_id}")
-def get_trend_history(politician_id: int):
-    data = fetch_safe(
-        "paragon_trends",
-        {
-            "select": "*,politicians(*)",
-            "politician_id": f"eq.{politician_id}",
-            "order": "calculated_at.desc",
-            "limit": 50
-        }
-    )
-
-    return {
-        "count": len(data),
-        "results": [_normalize_paragon_row(x) for x in data],
-    }
-
-
-# =====================================================================
-# 3. Risers / Fallers (same delta logic)
-# =====================================================================
-def compute_deltas(history: List[Dict[str, Any]]):
-    grouped = {}
-
-    for row in history:
-        pid = row.get("politician_id")
+    for r in rows:
+        pid = r.get("politician_id")
         if not pid:
             continue
-        grouped.setdefault(pid, []).append(row)
+        grouped.setdefault(pid, []).append(r)
 
-    deltas = {}
+    deltas: Dict[str, Dict[str, Any]] = {}
 
-    for pid, rows in grouped.items():
-        if len(rows) < 2:
+    for pid, snapshots in grouped.items():
+        if len(snapshots) < 2:
             continue
 
-        rows_sorted = sorted(rows, key=lambda r: r["calculated_at"], reverse=True)
+        snapshots_sorted = sorted(
+            snapshots,
+            key=lambda x: x.get("computed_at") or "",
+            reverse=True,
+        )
 
-        new_score = rows_sorted[0]["overall_score"]
-        prev_score = rows_sorted[1]["overall_score"]
+        new_score = int(snapshots_sorted[0]["score"])
+        prev_score = int(snapshots_sorted[1]["score"])
 
         deltas[pid] = {
             "politician_id": pid,
-            "name": rows_sorted[0].get("politicians", {}).get("name"),
             "new_score": new_score,
             "previous_score": prev_score,
             "delta": new_score - prev_score,
@@ -185,138 +107,191 @@ def compute_deltas(history: List[Dict[str, Any]]):
     return deltas
 
 
-@router.get("/trends/top-risers")
-def get_top_risers(limit: int = 10):
-    history = fetch_safe(
-        "paragon_trends",
-        {"select": "*,politicians(*)", "order": "calculated_at.desc", "limit": 300}
+# ============================================================
+# 1. Latest Live Scores
+# ============================================================
+
+@router.get("/latest")
+def get_latest_scores():
+    rows = _fetch_all_snapshots(limit=500)
+
+    # keep only latest snapshot per politician
+    latest: Dict[str, Dict[str, Any]] = {}
+    for r in rows:
+        pid = r["politician_id"]
+        if pid not in latest:
+            latest[pid] = r
+
+    normalized = [
+        _normalize_snapshot(v)
+        for v in latest.values()
+    ]
+
+    normalized.sort(
+        key=lambda x: x["overall_score"],
+        reverse=True,
     )
 
-    deltas = compute_deltas(history)
+    return {
+        "count": len(normalized),
+        "results": normalized,
+    }
+
+
+@router.get("/latest/{politician_id}")
+def get_latest_score_for(politician_id: str):
+    snap = get_paragon_snapshot(politician_id)
+    if not snap:
+        raise HTTPException(404, "PARAGON snapshot not found")
+
+    return {
+        "politician_id": snap.politician_id,
+        "overall_score": snap.score,
+        "dimensions": snap.breakdown,
+        "dimensions_json": snap.breakdown,
+        "version": snap.version,
+        "calculated_at": snap.computed_at,
+    }
+
+
+# ============================================================
+# 2. Risers / Fallers
+# ============================================================
+
+@router.get("/trends/top-risers")
+def get_top_risers(limit: int = 10):
+    rows = _fetch_all_snapshots(limit=500)
+    deltas = _compute_deltas(rows)
 
     risers = sorted(
         [d for d in deltas.values() if d["delta"] > 0],
         key=lambda x: x["delta"],
-        reverse=True
+        reverse=True,
     )
 
-    return {"count": len(risers), "results": risers[:limit]}
+    return {
+        "count": len(risers),
+        "results": risers[:limit],
+    }
 
 
 @router.get("/trends/top-fallers")
 def get_top_fallers(limit: int = 10):
-    history = fetch_safe(
-        "paragon_trends",
-        {"select": "*,politicians(*)", "order": "calculated_at.desc", "limit": 300}
-    )
-
-    deltas = compute_deltas(history)
+    rows = _fetch_all_snapshots(limit=500)
+    deltas = _compute_deltas(rows)
 
     fallers = sorted(
         [d for d in deltas.values() if d["delta"] < 0],
-        key=lambda x: x["delta"]
+        key=lambda x: x["delta"],
     )
 
-    return {"count": len(fallers), "results": fallers[:limit]}
+    return {
+        "count": len(fallers),
+        "results": fallers[:limit],
+    }
 
 
-# =====================================================================
-# 4. Momentum
-# =====================================================================
+# ============================================================
+# 3. Momentum (single politician)
+# ============================================================
+
 @router.get("/trends/momentum/{politician_id}")
-def get_momentum(politician_id: int):
-    rows = fetch_safe(
-        "paragon_trends",
-        {
-            "select": "*,politicians(*)",
-            "politician_id": f"eq.{politician_id}",
-            "order": "calculated_at.desc",
-            "limit": 2,
-        }
+def get_momentum(politician_id: str):
+    rows = (
+        supabase
+        .table("paragon_snapshots")
+        .select("*")
+        .eq("politician_id", politician_id)
+        .order("computed_at", desc=True)
+        .limit(2)
+        .execute()
+        .data
     )
 
-    if len(rows) < 2:
-        return {"message": "Not enough data", "delta": 0}
+    if not rows or len(rows) < 2:
+        return {
+            "politician_id": politician_id,
+            "delta": 0,
+            "message": "Not enough data",
+        }
 
-    new_score = rows[0]["overall_score"]
-    prev_score = rows[1]["overall_score"]
+    new_score = int(rows[0]["score"])
+    prev_score = int(rows[1]["score"])
 
     return {
         "politician_id": politician_id,
-        "name": rows[0].get("politicians", {}).get("name"),
         "new_score": new_score,
         "previous_score": prev_score,
         "delta": new_score - prev_score,
     }
 
 
-# =====================================================================
-# 5. Dashboard Aggregator
-# =====================================================================
+# ============================================================
+# 4. Dashboard Aggregator
+# ============================================================
+
 @router.get("/dashboard")
 def get_paragon_dashboard(limit: int = 10):
+    rows = _fetch_all_snapshots(limit=500)
 
-    latest_scores = fetch_safe(
-        "paragon_scores",
-        {"select": "*,politicians(*)", "order": "overall_score.desc"}
+    latest: Dict[str, Dict[str, Any]] = {}
+    for r in rows:
+        pid = r["politician_id"]
+        if pid not in latest:
+            latest[pid] = r
+
+    latest_norm = [
+        _normalize_snapshot(v)
+        for v in latest.values()
+    ]
+    latest_norm.sort(
+        key=lambda x: x["overall_score"],
+        reverse=True,
     )
-    latest_scores = [_normalize_paragon_row(x) for x in latest_scores]
 
-    trend_history = fetch_safe(
-        "paragon_trends",
-        {"select": "*,politicians(*)", "order": "calculated_at.desc", "limit": 500}
-    )
-    trend_history_norm = [_normalize_paragon_row(x) for x in trend_history]
-
-    deltas = compute_deltas(trend_history)
+    deltas = _compute_deltas(rows)
 
     top_risers = sorted(
         [d for d in deltas.values() if d["delta"] > 0],
         key=lambda x: x["delta"],
-        reverse=True
+        reverse=True,
     )[:limit]
 
     top_fallers = sorted(
         [d for d in deltas.values() if d["delta"] < 0],
-        key=lambda x: x["delta"]
+        key=lambda x: x["delta"],
     )[:limit]
 
     return {
-        "latestScores": latest_scores,
+        "latestScores": latest_norm[:limit],
         "topRisers": top_risers,
         "topFallers": top_fallers,
-        "recentTrends": trend_history_norm,
     }
 
 
-# =====================================================================
-# 6. Real-time recomputation
-# =====================================================================
+# ============================================================
+# 5. Real-time recomputation (LIVE)
+# ============================================================
+
 @router.post("/recompute/{politician_id}")
-def recompute_paragon_score(politician_id: int):
-
+def recompute_paragon_live(politician_id: str):
     try:
-        metrics = load_metrics_for(politician_id)
-        if not metrics:
-            raise HTTPException(404, "No metrics found for this politician")
-
-        scoring = score_metrics(metrics)
-
-        snapshot = record_paragon_snapshot(politician_id, scoring)
-
+        snapshot = compute_and_snapshot_paragon(politician_id)
         return {
-            "politician_id": politician_id,
-            "metrics": metrics,
-            "overall_score": scoring["overall_score"],
-            "dimensions": scoring["dimensions"],
-            "dimensions_json": scoring["dimensions"],
+            "message": "PARAGON recomputed successfully",
             "snapshot": snapshot,
-            "message": "PARAGON score recomputed successfully",
         }
-
-    except HTTPException:
-        raise
-
+    except ValueError as e:
+        raise HTTPException(404, str(e))
     except Exception as e:
-        print(f"[paragon_api] recompute failed: {e}")
-        raise HTTPException(500, "PARAGON recomputation failed")
+        raise HTTPException(500, f"PARAGON recomputation failed: {e}")
+
+
+@router.post("/recompute-all")
+def recompute_all():
+    updated = recompute_all_paragon()
+    return {
+        "message": "PARAGON recomputation completed",
+        "updated_profiles": updated,
+        "timestamp": datetime.utcnow().isoformat(),
+    }

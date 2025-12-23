@@ -7,11 +7,9 @@ Tables:
 - paragon_scores   → latest snapshot (1 row per politician)
 - paragon_trends   → historical time series (append-only)
 
-Features:
-- JSONB dimensions_json
-- atomic UTC timestamping
-- safe UPSERT (latest) + INSERT (history)
-- schema-tolerant (works with or without DB UNIQUE constraint)
+Notes:
+- paragon_scores uses column: overall_score
+- paragon_trends uses column: score   (NOT overall_score)
 """
 
 from __future__ import annotations
@@ -27,32 +25,27 @@ from utils.supabase_client import supabase_upsert, supabase_insert
 # =====================================================================
 
 def _now_iso() -> str:
-    """Return current UTC timestamp in ISO-8601 format."""
     return datetime.now(timezone.utc).isoformat()
 
 
 def _safe_dimensions(dimensions: Any) -> List[Dict[str, Any]]:
-    """
-    Ensures dimensions are a JSON-serializable list of dicts:
-    [{dimension: str, score: int}, ...]
-    """
     if not isinstance(dimensions, list):
         return []
 
-    clean: List[Dict[str, Any]] = []
+    out: List[Dict[str, Any]] = []
     for d in dimensions:
         if isinstance(d, dict):
-            clean.append(
+            out.append(
                 {
                     "dimension": d.get("dimension"),
                     "score": int(d.get("score", 0) or 0),
                 }
             )
-    return clean
+    return out
 
 
 # =====================================================================
-# 1. Write latest snapshot (UPSERT)
+# 1. Latest snapshot (UPSERT)
 # =====================================================================
 
 def write_latest_paragon_score(
@@ -62,13 +55,6 @@ def write_latest_paragon_score(
     dimensions: Any,
     calculated_at: Optional[str] = None,
 ):
-    """
-    Writes or updates the latest PARAGON score for a politician.
-
-    - One row per politician
-    - Conflict column: politician_id
-    """
-
     payload = {
         "politician_id": int(politician_id),
         "overall_score": int(overall_score),
@@ -76,25 +62,20 @@ def write_latest_paragon_score(
         "calculated_at": calculated_at or _now_iso(),
     }
 
-    try:
-        print(
-            f"[trend_engine] UPSERT paragon_scores "
-            f"(politician_id={politician_id}, overall={overall_score})"
-        )
+    print(
+        f"[trend_engine] UPSERT paragon_scores "
+        f"(politician_id={politician_id}, overall={overall_score})"
+    )
 
-        return supabase_upsert(
-            table="paragon_scores",
-            records=[payload],
-            conflict_col="politician_id",
-        )
-
-    except Exception as e:
-        print(f"[trend_engine] ERROR upserting paragon_scores: {e}")
-        raise
+    return supabase_upsert(
+        table="paragon_scores",
+        records=[payload],
+        conflict_col="politician_id",
+    )
 
 
 # =====================================================================
-# 2. Append historical trend point (INSERT)
+# 2. Historical trend point (INSERT)
 # =====================================================================
 
 def append_paragon_trend_point(
@@ -105,48 +86,36 @@ def append_paragon_trend_point(
     calculated_at: Optional[str] = None,
 ):
     """
-    Appends a new historical PARAGON trend record.
-
-    - Append-only
-    - Never updates existing rows
+    IMPORTANT:
+    paragon_trends uses column `score`, not `overall_score`
     """
 
     payload = {
         "politician_id": int(politician_id),
-        "overall_score": int(overall_score),
+        "score": int(overall_score),   # ← SCHEMA-CORRECT
         "dimensions_json": _safe_dimensions(dimensions),
         "calculated_at": calculated_at or _now_iso(),
     }
 
-    try:
-        print(
-            f"[trend_engine] INSERT paragon_trends "
-            f"(politician_id={politician_id}, overall={overall_score})"
-        )
+    print(
+        f"[trend_engine] INSERT paragon_trends "
+        f"(politician_id={politician_id}, score={overall_score})"
+    )
 
-        return supabase_insert(
-            table="paragon_trends",
-            records=[payload],
-        )
-
-    except Exception as e:
-        print(f"[trend_engine] ERROR inserting paragon_trends: {e}")
-        raise
+    return supabase_insert(
+        table="paragon_trends",
+        records=[payload],
+    )
 
 
 # =====================================================================
-# 3. Top-level aggregator (API + ETL entry point)
+# 3. Aggregator
 # =====================================================================
 
 def record_paragon_snapshot(
     politician_id: int,
     scoring_result: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """
-    Persists a full PARAGON scoring snapshot:
-    - updates latest score (paragon_scores)
-    - appends historical trend point (paragon_trends)
-    """
 
     if not scoring_result:
         raise ValueError("Empty scoring_result")

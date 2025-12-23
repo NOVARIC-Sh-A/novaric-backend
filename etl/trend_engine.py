@@ -1,9 +1,7 @@
-# etl/trend_engine.py
-
 """
 trend_engine.py
 
-Persists PARAGON scoring results into Supabase:
+Persists PARAGON scoring results into Supabase.
 
 Tables:
 - paragon_scores   → latest snapshot (1 row per politician)
@@ -11,8 +9,9 @@ Tables:
 
 Features:
 - JSONB dimensions_json
-- atomic timestamping
-- safe upsert + insert separation
+- atomic UTC timestamping
+- safe UPSERT (latest) + INSERT (history)
+- schema-tolerant (works with or without DB UNIQUE constraint)
 """
 
 from __future__ import annotations
@@ -28,13 +27,14 @@ from utils.supabase_client import supabase_upsert, supabase_insert
 # =====================================================================
 
 def _now_iso() -> str:
-    """UTC ISO-8601 timestamp"""
+    """Return current UTC timestamp in ISO-8601 format."""
     return datetime.now(timezone.utc).isoformat()
 
 
 def _safe_dimensions(dimensions: Any) -> List[Dict[str, Any]]:
     """
-    Ensures dimensions are a JSON-serializable list of dicts.
+    Ensures dimensions are a JSON-serializable list of dicts:
+    [{dimension: str, score: int}, ...]
     """
     if not isinstance(dimensions, list):
         return []
@@ -63,8 +63,10 @@ def write_latest_paragon_score(
     calculated_at: Optional[str] = None,
 ):
     """
-    Writes / updates the latest PARAGON score for a politician.
-    One row per politician (conflict: politician_id).
+    Writes or updates the latest PARAGON score for a politician.
+
+    - One row per politician
+    - Conflict column: politician_id
     """
 
     payload = {
@@ -104,7 +106,9 @@ def append_paragon_trend_point(
 ):
     """
     Appends a new historical PARAGON trend record.
-    Never updates existing rows.
+
+    - Append-only
+    - Never updates existing rows
     """
 
     payload = {
@@ -131,7 +135,7 @@ def append_paragon_trend_point(
 
 
 # =====================================================================
-# 3. Top-level aggregator (used by API + jobs)
+# 3. Top-level aggregator (API + ETL entry point)
 # =====================================================================
 
 def record_paragon_snapshot(
@@ -140,8 +144,8 @@ def record_paragon_snapshot(
 ) -> Dict[str, Any]:
     """
     Persists a full PARAGON scoring snapshot:
-    - updates latest score
-    - appends historical trend point
+    - updates latest score (paragon_scores)
+    - appends historical trend point (paragon_trends)
     """
 
     if not scoring_result:
@@ -166,7 +170,7 @@ def record_paragon_snapshot(
     )
 
     return {
-        "politician_id": politician_id,
+        "politician_id": int(politician_id),
         "overall_score": overall_score,
         "dimensions": _safe_dimensions(dimensions),
         "calculated_at": ts,

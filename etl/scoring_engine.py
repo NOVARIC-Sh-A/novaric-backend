@@ -1,11 +1,27 @@
-# scoring_engine.py
+# etl/scoring_engine.py
 
-from typing import Dict, Any, List
+"""
+PARAGON Scoring Engine
+
+Converts unified metrics into:
+- 8 PARAGON dimensions (0–100 each)
+- overall score (0–100)
+
+This implementation is defensive:
+- handles missing / malformed metric values
+- clamps numeric inputs into expected ranges
+- avoids division-by-zero in normalization
+"""
+
+from __future__ import annotations
+
+from typing import Any, Dict
+
 
 # ------------------------------------------------------------
 # Normalization ranges for metrics (min, max)
 # ------------------------------------------------------------
-RANGES = {
+RANGES: Dict[str, tuple[float, float]] = {
     "scandals_flagged": (0, 10),            # inverse
     "wealth_declaration_issues": (0, 5),    # inverse
     "public_projects_completed": (0, 50),
@@ -17,14 +33,14 @@ RANGES = {
     "independence_index": (0, 10),
     "sentiment_score": (-1, 1),
     "social_influence": (0, 10),
-    # New event-based momentum range (-10 to +10)
+    # Event-based momentum range (-10 to +10)
     "momentum_raw": (-10, 10),
 }
 
 # ------------------------------------------------------------
-# Dimension weights (unchanged for existing 7 dimensions)
+# Dimension weights
 # ------------------------------------------------------------
-WEIGHTS = {
+WEIGHTS: Dict[str, Dict[str, float]] = {
     "integrity": {
         "scandals_flagged": 0.60,
         "wealth_declaration_issues": 0.40,
@@ -45,17 +61,46 @@ WEIGHTS = {
     },
 }
 
+
+# =====================================================================
+# Helpers
+# =====================================================================
+def _as_number(value: Any, default: float = 0.0) -> float:
+    """
+    Best-effort numeric conversion. Returns default if not convertible.
+    """
+    if isinstance(value, (int, float)):
+        return float(value)
+    try:
+        return float(value)  # type: ignore[arg-type]
+    except Exception:
+        return float(default)
+
+
+def _clamp(value: float, min_v: float, max_v: float) -> float:
+    return max(min_v, min(value, max_v))
+
+
 # =====================================================================
 # NORMALIZATION FUNCTION
 # =====================================================================
-def _norm(key: str, value: float, inverse: bool = False) -> float:
-    min_v, max_v = RANGES.get(key, (0, 1))
-    clamped = max(min_v, min(value, max_v))
+def _norm(key: str, value: Any, inverse: bool = False) -> float:
+    """
+    Normalizes a value into 0..100 given configured ranges.
+    If inverse=True, returns 100 - normalized_score.
+    """
+    min_v, max_v = RANGES.get(key, (0.0, 1.0))
+    v = _as_number(value, default=min_v)
+    v = _clamp(v, min_v, max_v)
 
     span = max_v - min_v
-    score = ((clamped - min_v) / span) * 100 if span > 0 else 0
+    if span <= 0:
+        score = 0.0
+    else:
+        score = ((v - min_v) / span) * 100.0
 
-    return (100 - score) if inverse else score
+    score = 100.0 - score if inverse else score
+    return _clamp(score, 0.0, 100.0)
 
 
 # =====================================================================
@@ -75,8 +120,8 @@ def score_metrics(metrics: Dict[str, Any]) -> Dict[str, Any]:
     s_wealth = _norm("wealth_declaration_issues", metrics.get("wealth_declaration_issues", 0), inverse=True)
 
     integrity_score = (
-        s_scandals * WEIGHTS["integrity"]["scandals_flagged"] +
-        s_wealth * WEIGHTS["integrity"]["wealth_declaration_issues"]
+        s_scandals * WEIGHTS["integrity"]["scandals_flagged"]
+        + s_wealth * WEIGHTS["integrity"]["wealth_declaration_issues"]
     )
 
     # ------------------------------
@@ -87,9 +132,9 @@ def score_metrics(metrics: Dict[str, Any]) -> Dict[str, Any]:
     s_intl = _norm("international_meetings", metrics.get("international_meetings", 0))
 
     governance_score = (
-        s_projects * WEIGHTS["governance"]["public_projects_completed"] +
-        s_attendance * WEIGHTS["governance"]["parliamentary_attendance"] +
-        s_intl * WEIGHTS["governance"]["international_meetings"]
+        s_projects * WEIGHTS["governance"]["public_projects_completed"]
+        + s_attendance * WEIGHTS["governance"]["parliamentary_attendance"]
+        + s_intl * WEIGHTS["governance"]["international_meetings"]
     )
 
     # ------------------------------
@@ -100,9 +145,9 @@ def score_metrics(metrics: Dict[str, Any]) -> Dict[str, Any]:
     s_social = _norm("social_influence", metrics.get("social_influence", 0))
 
     influence_score = (
-        s_party * WEIGHTS["influence"]["party_control_index"] +
-        s_media * WEIGHTS["influence"]["media_mentions_monthly"] +
-        s_social * WEIGHTS["influence"]["social_influence"]
+        s_party * WEIGHTS["influence"]["party_control_index"]
+        + s_media * WEIGHTS["influence"]["media_mentions_monthly"]
+        + s_social * WEIGHTS["influence"]["social_influence"]
     )
 
     # ------------------------------
@@ -112,20 +157,20 @@ def score_metrics(metrics: Dict[str, Any]) -> Dict[str, Any]:
     s_ind = _norm("independence_index", metrics.get("independence_index", 0))
 
     professionalism_score = (
-        s_leg * WEIGHTS["professionalism"]["legislative_initiatives"] +
-        s_ind * WEIGHTS["professionalism"]["independence_index"]
+        s_leg * WEIGHTS["professionalism"]["legislative_initiatives"]
+        + s_ind * WEIGHTS["professionalism"]["independence_index"]
     )
 
     # ------------------------------
     # 5. Representation (derived)
     # ------------------------------
-    representation_score = (influence_score + professionalism_score) / 2
+    representation_score = _clamp((influence_score + professionalism_score) / 2.0, 0.0, 100.0)
 
     # ------------------------------
     # 6. Cohesion (derived)
     # ------------------------------
-    cohesion_score = metrics.get("party_control_index", 5) * 10
-    cohesion_score = max(0, min(100, cohesion_score))
+    cohesion_raw = _as_number(metrics.get("party_control_index", 5), default=5.0) * 10.0
+    cohesion_score = _clamp(cohesion_raw, 0.0, 100.0)
 
     # ------------------------------
     # 7. Narrative / Communication (derived)
@@ -133,10 +178,10 @@ def score_metrics(metrics: Dict[str, Any]) -> Dict[str, Any]:
     narrative_score = _norm("media_mentions_monthly", metrics.get("media_mentions_monthly", 0))
 
     # ------------------------------
-    # 8. NEW — Momentum & Resilience
+    # 8. Momentum & Resilience (new)
     # ------------------------------
-    pos = metrics.get("media_positive_events", 0)
-    neg = metrics.get("media_negative_events", 0)
+    pos = _as_number(metrics.get("media_positive_events", 0), default=0.0)
+    neg = _as_number(metrics.get("media_negative_events", 0), default=0.0)
 
     momentum_raw = pos - neg
     s_momentum = _norm("momentum_raw", momentum_raw)
@@ -145,20 +190,20 @@ def score_metrics(metrics: Dict[str, Any]) -> Dict[str, Any]:
     # Pack dimensions
     # ------------------------------
     dimensions = [
-        {"dimension": "Accountability & Transparency", "score": int(integrity_score)},
-        {"dimension": "Governance & Institutional Strength", "score": int(governance_score)},
-        {"dimension": "Assertiveness & Influence", "score": int(influence_score)},
-        {"dimension": "Policy Engagement & Expertise", "score": int(professionalism_score)},
-        {"dimension": "Representation & Responsiveness", "score": int(representation_score)},
-        {"dimension": "Organizational & Party Cohesion", "score": int(cohesion_score)},
-        {"dimension": "Narrative & Communication", "score": int(narrative_score)},
-        {"dimension": "Momentum & Resilience", "score": int(s_momentum)},   # NEW
+        {"dimension": "Accountability & Transparency", "score": int(_clamp(integrity_score, 0, 100))},
+        {"dimension": "Governance & Institutional Strength", "score": int(_clamp(governance_score, 0, 100))},
+        {"dimension": "Assertiveness & Influence", "score": int(_clamp(influence_score, 0, 100))},
+        {"dimension": "Policy Engagement & Expertise", "score": int(_clamp(professionalism_score, 0, 100))},
+        {"dimension": "Representation & Responsiveness", "score": int(_clamp(representation_score, 0, 100))},
+        {"dimension": "Organizational & Party Cohesion", "score": int(_clamp(cohesion_score, 0, 100))},
+        {"dimension": "Narrative & Communication", "score": int(_clamp(narrative_score, 0, 100))},
+        {"dimension": "Momentum & Resilience", "score": int(_clamp(s_momentum, 0, 100))},
     ]
 
     # ------------------------------
-    # Final overall score (now 8 dimensions)
+    # Final overall score
     # ------------------------------
-    overall = int(sum(d["score"] for d in dimensions) / len(dimensions))
+    overall = int(sum(d["score"] for d in dimensions) / len(dimensions)) if dimensions else 0
 
     return {
         "overall_score": overall,

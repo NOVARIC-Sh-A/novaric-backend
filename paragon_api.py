@@ -22,7 +22,11 @@ from etl.scoring_engine import score_metrics
 from etl.trend_engine import record_paragon_snapshot
 
 
-router = APIRouter(prefix="/api/paragon", tags=["PARAGON Analytics"])
+# =====================================================================
+# Router (Option A: NO /api here)
+# =====================================================================
+
+router = APIRouter(prefix="/paragon", tags=["PARAGON Analytics"])
 
 
 # =====================================================================

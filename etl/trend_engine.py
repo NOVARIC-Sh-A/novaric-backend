@@ -4,12 +4,10 @@ trend_engine.py
 Persists PARAGON scoring results into Supabase.
 
 Tables:
-- paragon_scores   → latest snapshot (1 row per politician)
-- paragon_trends   → historical time series (append-only)
+- paragon_scores   → latest snapshot (includes overall_score)
+- paragon_trends   → historical series (dimensions only)
 
-Notes:
-- paragon_scores uses column: overall_score
-- paragon_trends uses column: score   (NOT overall_score)
+This implementation matches the EXISTING Supabase schema.
 """
 
 from __future__ import annotations
@@ -32,16 +30,16 @@ def _safe_dimensions(dimensions: Any) -> List[Dict[str, Any]]:
     if not isinstance(dimensions, list):
         return []
 
-    out: List[Dict[str, Any]] = []
+    clean: List[Dict[str, Any]] = []
     for d in dimensions:
         if isinstance(d, dict):
-            out.append(
+            clean.append(
                 {
                     "dimension": d.get("dimension"),
                     "score": int(d.get("score", 0) or 0),
                 }
             )
-    return out
+    return clean
 
 
 # =====================================================================
@@ -75,31 +73,29 @@ def write_latest_paragon_score(
 
 
 # =====================================================================
-# 2. Historical trend point (INSERT)
+# 2. Historical trend point (INSERT — NO SCORE COLUMN)
 # =====================================================================
 
 def append_paragon_trend_point(
     *,
     politician_id: int,
-    overall_score: int,
     dimensions: Any,
     calculated_at: Optional[str] = None,
 ):
     """
-    IMPORTANT:
-    paragon_trends uses column `score`, not `overall_score`
+    paragon_trends does NOT contain a numeric score column.
+    It stores dimension evolution only.
     """
 
     payload = {
         "politician_id": int(politician_id),
-        "score": int(overall_score),   # ← SCHEMA-CORRECT
         "dimensions_json": _safe_dimensions(dimensions),
         "calculated_at": calculated_at or _now_iso(),
     }
 
     print(
         f"[trend_engine] INSERT paragon_trends "
-        f"(politician_id={politician_id}, score={overall_score})"
+        f"(politician_id={politician_id})"
     )
 
     return supabase_insert(
@@ -109,7 +105,7 @@ def append_paragon_trend_point(
 
 
 # =====================================================================
-# 3. Aggregator
+# 3. Aggregator (API + ETL)
 # =====================================================================
 
 def record_paragon_snapshot(
@@ -133,7 +129,6 @@ def record_paragon_snapshot(
 
     trend_row = append_paragon_trend_point(
         politician_id=politician_id,
-        overall_score=overall_score,
         dimensions=dimensions,
         calculated_at=ts,
     )

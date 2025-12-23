@@ -25,15 +25,37 @@ from fastapi.responses import Response
 from pydantic import BaseModel
 
 # ================================================================
+# LOGGING (BOOT FIRST)
+# ================================================================
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+)
+logger = logging.getLogger("novaric-backend")
+logger.info("NOVARIC backend boot sequence started")
+
+# ================================================================
 # DATA LOADER (LEGACY COMPATIBILITY)
 # ================================================================
 from utils.data_loader import load_profiles_data
 
 # ================================================================
-# ROUTERS
+# ROUTERS (GUARDED IMPORTS — DO NOT BLOCK SERVER START)
 # ================================================================
-from paragon_api import router as paragon_router
-from routers.profile_enrichment import router as enrichment_router
+paragon_router = None
+enrichment_router = None
+
+try:
+    from paragon_api import router as paragon_router  # type: ignore
+    logger.info("PARAGON router loaded")
+except Exception as e:
+    logger.error(f"Failed to load PARAGON router (startup continues): {e}")
+
+try:
+    from routers.profile_enrichment import router as enrichment_router  # type: ignore
+    logger.info("Enrichment router loaded")
+except Exception as e:
+    logger.error(f"Failed to load enrichment router (startup continues): {e}")
 
 # ================================================================
 # FEED REGISTRY
@@ -48,21 +70,14 @@ from config.rss_feeds import (
 # NER (NOVARIC ECOSYSTEM RATING)
 # ================================================================
 try:
-    from services.ner_engine import compute_ner
-    from services.ner_repository import get_snapshot, save_snapshot
-except Exception:
+    from services.ner_engine import compute_ner  # type: ignore
+    from services.ner_repository import get_snapshot, save_snapshot  # type: ignore
+    logger.info("NER engine loaded")
+except Exception as e:
     compute_ner = None
     get_snapshot = None
     save_snapshot = None
-
-# ================================================================
-# LOGGING
-# ================================================================
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
-)
-logger = logging.getLogger("novaric-backend")
+    logger.warning(f"NER disabled (startup continues): {e}")
 
 # ================================================================
 # SIMPLE IN-MEMORY TTL CACHE
@@ -73,6 +88,8 @@ _NEWS_CACHE_TTL_SECONDS = int(os.getenv("NEWS_CACHE_TTL_SECONDS", "300"))
 # ================================================================
 # FASTAPI APP
 # ================================================================
+logger.info("Creating FastAPI app")
+
 app = FastAPI(
     title="NOVARIC Backend",
     description="Official NOVARIC® Backend Services • News • PARAGON • Enrichment",
@@ -212,6 +229,8 @@ def _dedupe_key(article: NewsArticle) -> str:
 def _epoch(ts: str) -> float:
     try:
         dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
         return dt.timestamp()
     except Exception:
         return 0.0
@@ -222,8 +241,12 @@ def _choose_better(a: NewsArticle, b: NewsArticle) -> NewsArticle:
     br = b.ecosystemRating or -1
     if br != ar:
         return b if br > ar else a
-    if _epoch(b.timestamp) != _epoch(a.timestamp):
-        return b if _epoch(b.timestamp) > _epoch(a.timestamp) else a
+
+    ea = _epoch(a.timestamp)
+    eb = _epoch(b.timestamp)
+    if eb != ea:
+        return b if eb > ea else a
+
     return b if (b.feedUrl, b.id) < (a.feedUrl, a.id) else a
 
 
@@ -240,6 +263,8 @@ def root():
         "message": "NOVARIC® Engine Online",
         "profiles_loaded": profiles_count,
         "news_cache_ttl_seconds": _NEWS_CACHE_TTL_SECONDS,
+        "paragon_router_loaded": bool(paragon_router),
+        "enrichment_router_loaded": bool(enrichment_router),
     }
 
 
@@ -283,6 +308,7 @@ async def collect_news_articles(category: str) -> List[NewsArticle]:
             if not entries:
                 continue
 
+            # Exactly ONE per feed (most recent)
             entry = sorted(entries, key=_safe_epoch_from_entry, reverse=True)[0]
 
             article_id = str(entry.get("id") or entry.get("link") or "")
@@ -302,7 +328,11 @@ async def collect_news_articles(category: str) -> List[NewsArticle]:
             if snapshot:
                 ecosystem_rating = snapshot.ecosystemRating
                 ner_version = snapshot.nerVersion
-                ner_breakdown = snapshot.breakdown.__dict__
+                # snapshot.breakdown can be dataclass-like; preserve safely
+                try:
+                    ner_breakdown = snapshot.breakdown.__dict__
+                except Exception:
+                    ner_breakdown = snapshot.breakdown
             elif compute_ner and save_snapshot:
                 try:
                     ner = compute_ner(
@@ -344,6 +374,7 @@ async def collect_news_articles(category: str) -> List[NewsArticle]:
                 )
             )
 
+    # Cross-feed duplicate suppression
     deduped: Dict[str, NewsArticle] = {}
     for a in articles:
         k = _dedupe_key(a)
@@ -410,8 +441,12 @@ async def rss_feed(category: str = Query(default="all")):
 # ================================================================
 # ROUTERS
 # ================================================================
-app.include_router(paragon_router)
-app.include_router(enrichment_router)
+if paragon_router:
+    app.include_router(paragon_router)
+
+if enrichment_router:
+    app.include_router(enrichment_router)
+
 
 # ================================================================
 # LIFECYCLE

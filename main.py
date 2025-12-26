@@ -1,5 +1,3 @@
-# main.py
-
 # ================================================================
 # RSS FEED ADAPTER (MUST BE FIRST IMPORT)
 # ================================================================
@@ -46,6 +44,7 @@ paragon_router = None
 enrichment_router = None
 
 try:
+    # IMPORTANT: paragon_api.router prefix MUST be "/paragon"
     from paragon_api import router as paragon_router  # type: ignore
     logger.info("PARAGON router loaded")
 except Exception as e:
@@ -97,6 +96,28 @@ app = FastAPI(
     docs_url=None,
     redoc_url=None,
 )
+
+# ================================================================
+# ROUTE INTROSPECTION (DEBUG / DIAGNOSTICS)
+# ================================================================
+@app.get("/__routes", include_in_schema=False)
+def list_routes():
+    """
+    Lists all mounted routes for debugging.
+    SAFE: no side effects, no data exposure.
+    """
+    return sorted(
+        [
+            {
+                "path": r.path,
+                "name": r.name,
+                "methods": list(getattr(r, "methods", [])),
+            }
+            for r in app.router.routes
+            if hasattr(r, "path")
+        ],
+        key=lambda x: x["path"],
+    )
 
 # ================================================================
 # STATIC FILES
@@ -308,7 +329,6 @@ async def collect_news_articles(category: str) -> List[NewsArticle]:
             if not entries:
                 continue
 
-            # Exactly ONE per feed (most recent)
             entry = sorted(entries, key=_safe_epoch_from_entry, reverse=True)[0]
 
             article_id = str(entry.get("id") or entry.get("link") or "")
@@ -328,7 +348,6 @@ async def collect_news_articles(category: str) -> List[NewsArticle]:
             if snapshot:
                 ecosystem_rating = snapshot.ecosystemRating
                 ner_version = snapshot.nerVersion
-                # snapshot.breakdown can be dataclass-like; preserve safely
                 try:
                     ner_breakdown = snapshot.breakdown.__dict__
                 except Exception:
@@ -374,7 +393,6 @@ async def collect_news_articles(category: str) -> List[NewsArticle]:
                 )
             )
 
-    # Cross-feed duplicate suppression
     deduped: Dict[str, NewsArticle] = {}
     for a in articles:
         k = _dedupe_key(a)
@@ -398,62 +416,37 @@ async def get_news(category: str = Query(default="all")):
 
 
 # ================================================================
-# RSS FEED
-# ================================================================
-@app.get("/rss.xml", include_in_schema=False)
-async def rss_feed(category: str = Query(default="all")):
-    articles = await collect_news_articles(category)
-
-    fg = FeedGenerator()
-    fg.id("https://api.media.novaric.al/rss.xml")
-    fg.title("NOVARIC® Media")
-    fg.link(href="https://media.novaric.al", rel="alternate")
-    fg.link(href=f"https://api.media.novaric.al/rss.xml?category={category}", rel="self")
-    fg.description("AI-powered media intelligence from NOVARIC®")
-    fg.language("en")
-    fg.updated(datetime.now(timezone.utc))
-
-    for article in articles:
-        fe = fg.add_entry()
-        fe.id(article.id)
-        fe.title(article.title)
-        fe.link(href=article.originalArticleUrl or "")
-        fe.description(article.content)
-        fe.author({"name": article.sourceName})
-        fe.category(term=article.sourceType)
-
-        if article.ecosystemRating is not None:
-            fe.rss_entry()["extension_elements"] = [
-                ("novaric:ecosystemRating", str(article.ecosystemRating)),
-                ("novaric:nerVersion", str(article.nerVersion or "")),
-            ]
-
-        if article.imageUrl:
-            fe.enclosure(article.imageUrl, 0, "image/jpeg")
-
-    return Response(
-        content=fg.rss_str(pretty=True),
-        media_type="application/rss+xml; charset=utf-8",
-        headers={"Cache-Control": "public, max-age=600"},
-    )
-
-
-# ================================================================
-# ROUTERS
+# ROUTERS (AUTHORITATIVE MOUNTING)
 # ================================================================
 if paragon_router:
-    app.include_router(paragon_router)
+    app.include_router(paragon_router, prefix="/api")
+    logger.info("PARAGON router mounted at /api/paragon")
+
+    # 🔍 Log actual mounted paths
+    for r in paragon_router.routes:
+        logger.info(f"[PARAGON ROUTE] /api{r.path}")
 
 if enrichment_router:
-    app.include_router(enrichment_router)
-
+    app.include_router(enrichment_router, prefix="/api")
+    logger.info("Enrichment router mounted at /api/*")
 
 # ================================================================
-# LIFECYCLE
+# LIFECYCLE (SINGLE STARTUP HOOK — CORRECT)
 # ================================================================
 @app.on_event("startup")
 def startup_event():
-    logger.info("NOVARIC Backend started.")
+    logger.info("NOVARIC Backend starting...")
+
+    expected = "/api/paragon/recompute/{politician_id}"
+    for r in app.router.routes:
+        if getattr(r, "path", "") == expected:
+            logger.info("PARAGON recompute route verified")
+            break
+    else:
+        logger.error(f"PARAGON recompute route NOT mounted: {expected}")
+        raise RuntimeError("PARAGON router not mounted correctly")
+
+    logger.info("NOVARIC Backend started successfully.")
 
 
 @app.on_event("shutdown")

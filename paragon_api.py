@@ -23,17 +23,24 @@ from etl.trend_engine import record_paragon_snapshot
 
 
 # =====================================================================
-# Router (Option A: NO /api here)
+# ROUTER (Option A — NO /api prefix here)
+# Mounted by main.py under /api
 # =====================================================================
 
-router = APIRouter(prefix="/paragon", tags=["PARAGON Analytics"])
+router = APIRouter(
+    prefix="/paragon",
+    tags=["PARAGON Analytics"],
+)
 
 
 # =====================================================================
-# Supabase safe fetch
+# SUPABASE SAFE FETCH
 # =====================================================================
 
 def _fetch_safe(table: str, params: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    Wrapper around Supabase GET to prevent API crashes.
+    """
     try:
         return _get(table, params) or []
     except Exception as e:
@@ -42,12 +49,12 @@ def _fetch_safe(table: str, params: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 # =====================================================================
-# Row normalization (schema-resilient)
+# ROW NORMALIZATION (SCHEMA-RESILIENT)
 # =====================================================================
 
 def _extract_score(row: Dict[str, Any]) -> int:
     """
-    Extracts the score regardless of column naming.
+    Extracts score value regardless of historical column naming.
     """
     for key in (
         "overall_score",
@@ -66,6 +73,9 @@ def _extract_score(row: Dict[str, Any]) -> int:
 
 
 def _normalize_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Normalizes Supabase row into frontend-safe format.
+    """
     dims = row.get("dimensions_json") or []
     if not isinstance(dims, list):
         dims = []
@@ -79,14 +89,18 @@ def _normalize_row(row: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # =====================================================================
-# 1. Latest scores
+# 1. LATEST SCORES
 # =====================================================================
 
 @router.get("/latest")
 def get_latest_scores(limit: int = 500):
     rows = _fetch_safe(
         "paragon_scores",
-        {"select": "*,politicians(*)", "order": "overall_score.desc", "limit": limit},
+        {
+            "select": "*,politicians(*)",
+            "order": "overall_score.desc",
+            "limit": limit,
+        },
     )
     data = [_normalize_row(r) for r in rows]
     return {"count": len(data), "results": data}
@@ -110,14 +124,18 @@ def get_latest_score_for(politician_id: int):
 
 
 # =====================================================================
-# 2. Trend endpoints
+# 2. TREND ENDPOINTS
 # =====================================================================
 
 @router.get("/trends/latest")
 def get_latest_trends(limit: int = 500):
     rows = _fetch_safe(
         "paragon_trends",
-        {"select": "*,politicians(*)", "order": "calculated_at.desc", "limit": limit},
+        {
+            "select": "*,politicians(*)",
+            "order": "calculated_at.desc",
+            "limit": limit,
+        },
     )
     data = [_normalize_row(r) for r in rows]
     return {"count": len(data), "results": data}
@@ -139,7 +157,7 @@ def get_trend_history(politician_id: int, limit: int = 50):
 
 
 # =====================================================================
-# 3. Delta computation
+# 3. DELTA COMPUTATION
 # =====================================================================
 
 def _compute_deltas(history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -182,7 +200,11 @@ def _compute_deltas(history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 def get_top_risers(limit: int = 10, scan_limit: int = 500):
     history = _fetch_safe(
         "paragon_trends",
-        {"select": "*,politicians(*)", "order": "calculated_at.desc", "limit": scan_limit},
+        {
+            "select": "*,politicians(*)",
+            "order": "calculated_at.desc",
+            "limit": scan_limit,
+        },
     )
     deltas = [d for d in _compute_deltas(history) if d["delta"] > 0]
     deltas.sort(key=lambda x: x["delta"], reverse=True)
@@ -193,7 +215,11 @@ def get_top_risers(limit: int = 10, scan_limit: int = 500):
 def get_top_fallers(limit: int = 10, scan_limit: int = 500):
     history = _fetch_safe(
         "paragon_trends",
-        {"select": "*,politicians(*)", "order": "calculated_at.desc", "limit": scan_limit},
+        {
+            "select": "*,politicians(*)",
+            "order": "calculated_at.desc",
+            "limit": scan_limit,
+        },
     )
     deltas = [d for d in _compute_deltas(history) if d["delta"] < 0]
     deltas.sort(key=lambda x: x["delta"])
@@ -228,18 +254,26 @@ def get_momentum(politician_id: int):
 
 
 # =====================================================================
-# 4. Dashboard
+# 4. DASHBOARD
 # =====================================================================
 
 @router.get("/dashboard")
 def get_paragon_dashboard(limit: int = 10, scan_limit: int = 500):
     latest = _fetch_safe(
         "paragon_scores",
-        {"select": "*,politicians(*)", "order": "overall_score.desc", "limit": 50},
+        {
+            "select": "*,politicians(*)",
+            "order": "overall_score.desc",
+            "limit": 50,
+        },
     )
     trends = _fetch_safe(
         "paragon_trends",
-        {"select": "*,politicians(*)", "order": "calculated_at.desc", "limit": scan_limit},
+        {
+            "select": "*,politicians(*)",
+            "order": "calculated_at.desc",
+            "limit": scan_limit,
+        },
     )
 
     latest = [_normalize_row(r) for r in latest]
@@ -263,7 +297,7 @@ def get_paragon_dashboard(limit: int = 10, scan_limit: int = 500):
 
 
 # =====================================================================
-# 5. Recomputation (SAFE MODE only)
+# 5. RECOMPUTATION (SAFE MODE ONLY)
 # =====================================================================
 
 @router.post("/recompute/{politician_id}")
@@ -283,7 +317,10 @@ def recompute_paragon_score(politician_id: int):
 
     except Exception as e:
         print(f"[paragon_api] recompute failed: {e}")
-        raise HTTPException(status_code=500, detail="PARAGON recomputation failed")
+        raise HTTPException(
+            status_code=500,
+            detail="PARAGON recomputation failed",
+        )
 
 
 @router.post("/recompute-all")
@@ -301,7 +338,12 @@ def recompute_all(scan_limit: int = 500):
             record_paragon_snapshot(pid, scoring)
             updated += 1
         except Exception as e:
-            failed.append({"politician_id": r.get("id"), "error": str(e)})
+            failed.append(
+                {
+                    "politician_id": r.get("id"),
+                    "error": str(e),
+                }
+            )
 
     return {
         "message": "PARAGON recomputation completed",

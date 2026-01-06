@@ -1,6 +1,9 @@
 # mock_profiles.py
 import random
 import logging
+import os
+MOCK_PROFILES_QUIET = os.getenv("MOCK_PROFILES_QUIET") == "1"
+MOCK_PROFILES_NO_HYDRATE = os.getenv("MOCK_PROFILES_NO_HYDRATE") == "1"
 from typing import Any, Dict, List, Union
 
 # Type aliases

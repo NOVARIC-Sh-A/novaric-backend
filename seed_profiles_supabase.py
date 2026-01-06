@@ -1,75 +1,81 @@
-import os
 import json
+import os
 import math
 import urllib.request
 import urllib.error
 
 SUPABASE_URL = os.environ["SUPABASE_URL"].rstrip("/")
-SUPABASE_SERVICE_ROLE_KEY = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
-JSON_PATH = os.environ.get("PROFILES_JSON", "profiles_seed.json")
-
-TABLE = os.environ.get("SUPABASE_TABLE", "profiles")  # schema is public by default in PostgREST
+SERVICE_ROLE_KEY = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
+TABLE = os.environ.get("SUPABASE_TABLE", "profiles")
+JSON_PATH = os.environ["PROFILES_JSON"]
 BATCH_SIZE = int(os.environ.get("BATCH_SIZE", "200"))
 
-def chunked(lst, n):
-    for i in range(0, len(lst), n):
-        yield lst[i:i+n]
+HEADERS = {
+    "apikey": SERVICE_ROLE_KEY,
+    "Authorization": f"Bearer {SERVICE_ROLE_KEY}",
+    "Content-Type": "application/json",
+    "Prefer": "resolution=merge-duplicates"
+}
 
-def postgrest_upsert(rows):
+def extract_party(category: str | None) -> str | None:
+    if not category:
+        return None
+    if "(" in category and ")" in category:
+        return category.split("(")[-1].split(")")[0]
+    return None
+
+def load_profiles():
+    with open(JSON_PATH, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+def normalize(profile: dict) -> dict:
+    return {
+        "id": profile["id"],
+        "name": profile.get("name"),
+        "short_bio": profile.get("shortBio"),
+        "detailed_bio": profile.get("detailedBio"),
+        "zodiac_sign": profile.get("zodiacSign"),
+        "political_party": extract_party(profile.get("category")),
+        "payload": profile
+    }
+
+def upsert_batch(batch):
     url = f"{SUPABASE_URL}/rest/v1/{TABLE}?on_conflict=id"
-    data = json.dumps(rows, ensure_ascii=False).encode("utf-8")
+    data = json.dumps(batch, ensure_ascii=False).encode("utf-8")
 
     req = urllib.request.Request(
-        url=url,
+        url,
         data=data,
-        method="POST",
-        headers={
-            "Content-Type": "application/json",
-            "apikey": SUPABASE_SERVICE_ROLE_KEY,
-            "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
-            # merge-duplicates updates existing rows; do not require all cols present
-            "Prefer": "resolution=merge-duplicates,return=representation",
-        },
+        headers=HEADERS,
+        method="POST"
     )
 
-    with urllib.request.urlopen(req, timeout=60) as resp:
-        body = resp.read().decode("utf-8")
-        return resp.status, body
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            return resp.status, resp.read().decode()
+    except urllib.error.HTTPError as e:
+        return e.code, e.read().decode()
 
 def main():
-    with open(JSON_PATH, "r", encoding="utf-8") as f:
-        profiles = json.load(f)
+    profiles = load_profiles()
+    total = len(profiles)
+    batches = math.ceil(total / BATCH_SIZE)
 
-    # Convert each profile dict into a row:
-    # - id: required for on_conflict
-    # - payload: full profile JSON
-    rows = []
-    for p in profiles:
-        pid = p.get("id")
-        if not pid:
-            continue
-        rows.append({
-            "id": str(pid),
-            "payload": p,
-        })
+    print(f"Seeding {total} profiles into public.{TABLE} in {batches} batch(es)...")
 
-    total = len(rows)
-    if total == 0:
-        raise SystemExit("No rows to insert (check JSON file).")
+    for i in range(batches):
+        chunk = profiles[i * BATCH_SIZE:(i + 1) * BATCH_SIZE]
+        payload = [normalize(p) for p in chunk]
 
-    print(f"Seeding {total} profiles into public.{TABLE} in batches of {BATCH_SIZE}...")
+        status, body = upsert_batch(payload)
 
-    batches = list(chunked(rows, BATCH_SIZE))
-    for i, batch in enumerate(batches, start=1):
-        try:
-            status, body = postgrest_upsert(batch)
-            print(f"[{i}/{len(batches)}] OK {status}: upserted {len(batch)} rows")
-        except urllib.error.HTTPError as e:
-            err_body = e.read().decode("utf-8", errors="replace")
-            print(f"[{i}/{len(batches)}] ERROR {e.code}: {err_body}")
-            raise
+        if status not in (200, 201):
+            print(f"[{i+1}/{batches}] ERROR {status}: {body}")
+            raise SystemExit(1)
 
-    print("Done.")
+        print(f"[{i+1}/{batches}] OK ({len(payload)} records)")
+
+    print("✔ Seeding complete.")
 
 if __name__ == "__main__":
     main()

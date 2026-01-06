@@ -4,6 +4,7 @@ import math
 import time
 import urllib.request
 import urllib.error
+import urllib.parse
 from typing import Any, Dict, List, Optional, Tuple
 
 SUPABASE_URL = os.environ["SUPABASE_URL"].rstrip("/")
@@ -12,8 +13,8 @@ PROFILES_JSON = os.environ.get("PROFILES_JSON", "profiles_seed.json")
 SUPABASE_TABLE = os.environ.get("SUPABASE_TABLE", "profiles")
 BATCH_SIZE = int(os.environ.get("BATCH_SIZE", "200"))
 
-# Set to "1" if you want reminding columns to be populated too
-ENRICH_COLUMNS = os.environ.get("ENRICH_COLUMNS", "1") == "1"
+# If your table has NOT NULL constraints beyond "name", set these defaults accordingly.
+DEFAULT_TEXT = os.environ.get("DEFAULT_TEXT", "")  # used to avoid NOT NULL failures on text columns
 
 
 def _headers(prefer: str) -> Dict[str, str]:
@@ -53,7 +54,6 @@ def load_profiles() -> List[Dict[str, Any]]:
 
 
 def fetch_politicians_map() -> Dict[str, int]:
-    # Adjust if your table name/schema differs
     status, body = _request("GET", "/rest/v1/politicians?select=id,name&limit=10000", prefer="return=representation")
     if status >= 300:
         raise RuntimeError(f"Failed to fetch politicians list ({status}): {body}")
@@ -77,106 +77,74 @@ def party_from_category(category: str) -> Optional[str]:
     return None
 
 
-def upsert_payload_batch(batch: List[Dict[str, Any]]) -> Tuple[int, str]:
+def build_row(p: Dict[str, Any], pol_map: Dict[str, int]) -> Dict[str, Any]:
     """
-    IMPORTANT: Every object in the array has the SAME keys: {id, payload}
-    This avoids PGRST102.
+    Build a single row for INSERT/UPSERT.
+    IMPORTANT: Every row must have identical keys to avoid PGRST102.
     """
+    profile_id = str(p.get("id") or "").strip()
+    if not profile_id:
+        raise ValueError("Profile missing id")
+
+    name = (p.get("name") or "").strip()
+    if not name:
+        # table enforces NOT NULL name; fail early with clear message
+        raise ValueError(f"Profile {profile_id} missing name in JSON payload")
+
+    category = (p.get("category") or "").strip()
+    short_bio = p.get("shortBio") or p.get("short_bio") or ""
+    detailed_bio = p.get("detailedBio") or p.get("detailed_bio") or ""
+    image_url = p.get("imageUrl") or p.get("image_url") or ""
+
+    politician_id = pol_map.get(name)
+    party = party_from_category(category)
+
+    # Use DEFAULT_TEXT to avoid NOT NULL failures on these if your schema enforces them
+    # (leave as None if you prefer storing NULLs and columns allow it)
+    row: Dict[str, Any] = {
+        "id": profile_id,
+        "name": name,
+        "payload": p,
+
+        # Common “view-friendly” columns (safe even if nullable)
+        "politician_id": politician_id,
+        "profile_image_url": image_url or DEFAULT_TEXT,
+        "short_bio": short_bio or DEFAULT_TEXT,
+        "headline": category or DEFAULT_TEXT,
+        "detailed_bio": detailed_bio or DEFAULT_TEXT,
+        "political_party": party,
+    }
+    return row
+
+
+def upsert_batch(batch: List[Dict[str, Any]]) -> Tuple[int, str]:
     path = f"/rest/v1/{SUPABASE_TABLE}?on_conflict=id"
     body = json.dumps(batch, ensure_ascii=False).encode("utf-8")
     prefer = "resolution=merge-duplicates,return=minimal"
     return _request("POST", path, body=body, prefer=prefer, timeout=120)
 
 
-def patch_profile(profile_id: str, patch: Dict[str, Any]) -> Tuple[int, str]:
-    """
-    Patch a single row by id. Keys can differ between calls; no PGRST102 risk.
-    """
-    # URL-encode quotes around the value
-    path = f"/rest/v1/{SUPABASE_TABLE}?id=eq.{urllib.parse.quote(profile_id)}"
-    body = json.dumps(patch, ensure_ascii=False).encode("utf-8")
-    prefer = "return=minimal"
-    return _request("PATCH", path, body=body, prefer=prefer, timeout=60)
-
-
 def main() -> None:
     profiles = load_profiles()
     print(f"Loaded {len(profiles)} profiles from {PROFILES_JSON}.")
 
-    try:
-        pol_map = fetch_politicians_map()
-        print(f"Fetched {len(pol_map)} politicians for name->id matching.")
-    except Exception as e:
-        pol_map = {}
-        print(f"WARNING: could not load politicians map; politician_id will be NULL. Error: {e}")
+    pol_map = fetch_politicians_map()
+    print(f"Fetched {len(pol_map)} politicians for name->id matching.")
 
-    # Step 1: upsert only (id, payload) in batches (uniform keys => no PGRST102)
-    payload_rows = []
-    for p in profiles:
-        pid = str(p.get("id") or "").strip()
-        if not pid:
-            raise ValueError("Profile missing id")
-        payload_rows.append({"id": pid, "payload": p})
+    rows = [build_row(p, pol_map) for p in profiles]
 
-    total = len(payload_rows)
+    total = len(rows)
     batches = math.ceil(total / BATCH_SIZE)
-    print(f"Seeding {total} profiles into public.{SUPABASE_TABLE} (id + payload) in batches of {BATCH_SIZE}...")
+    print(f"Seeding {total} profiles into public.{SUPABASE_TABLE} in batches of {BATCH_SIZE}...")
 
     for i in range(batches):
-        batch = payload_rows[i * BATCH_SIZE : (i + 1) * BATCH_SIZE]
-        status, body = upsert_payload_batch(batch)
+        batch = rows[i * BATCH_SIZE : (i + 1) * BATCH_SIZE]
+        status, body = upsert_batch(batch)
         if status >= 300:
             print(f"[{i+1}/{batches}] ERROR {status}: {body}")
             raise SystemExit(1)
         print(f"[{i+1}/{batches}] OK ({len(batch)} rows)")
         time.sleep(0.2)
-
-    # Step 2 (optional): enrich columns used by v_politician_cards, without null overwrites
-    if ENRICH_COLUMNS:
-        print("Enriching view-friendly columns (politician_id, profile_image_url, short_bio, headline, detailed_bio, political_party)...")
-
-        enriched = 0
-        for p in profiles:
-            profile_id = str(p.get("id") or "").strip()
-            name = (p.get("name") or "").strip()
-            category = (p.get("category") or "").strip()
-
-            patch: Dict[str, Any] = {}
-
-            politician_id = pol_map.get(name)
-            if politician_id is not None:
-                patch["politician_id"] = politician_id
-
-            image_url = p.get("imageUrl") or p.get("image_url")
-            if image_url:
-                patch["profile_image_url"] = image_url
-
-            short_bio = p.get("shortBio") or p.get("short_bio")
-            if short_bio:
-                patch["short_bio"] = short_bio
-
-            detailed_bio = p.get("detailedBio") or p.get("detailed_bio")
-            if detailed_bio:
-                patch["detailed_bio"] = detailed_bio
-
-            if category:
-                patch["headline"] = category
-
-            party = party_from_category(category)
-            if party:
-                patch["political_party"] = party
-
-            if not patch:
-                continue
-
-            status, body = patch_profile(profile_id, patch)
-            if status >= 300:
-                print(f"[PATCH] ERROR id={profile_id} {status}: {body}")
-                raise SystemExit(1)
-
-            enriched += 1
-
-        print(f"Enrichment done. Patched {enriched} profiles.")
 
     print("Done.")
 

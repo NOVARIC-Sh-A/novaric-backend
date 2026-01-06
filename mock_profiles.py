@@ -1,40 +1,46 @@
 # mock_profiles.py
+import os
 import random
 import logging
-import os
+from typing import Any, Dict, List, Union
+
+# =============================================================================
+# EXPORT / DEV FLAGS
+# =============================================================================
 MOCK_PROFILES_QUIET = os.getenv("MOCK_PROFILES_QUIET") == "1"
 MOCK_PROFILES_NO_HYDRATE = os.getenv("MOCK_PROFILES_NO_HYDRATE") == "1"
-from typing import Any, Dict, List, Union
+
 
 # Type aliases
 VipProfile = Dict[str, Any]
 ParagonEntry = Dict[str, Any]
 
 # =====================================================================================
-# ARCHITECTURE IMPORTS: The "Bridge" to the New PARAGON Engine
+# ARCHITECTURE IMPORTS: The "Bridge" to the PARAGON Engine
 # =====================================================================================
-try:
-    # NEW engine paths
-    from etl.metric_loader import load_metrics_for
-    from etl.scoring_engine import score_metrics
+ENGINE_AVAILABLE = False
+RAW_EVIDENCE: Dict[str, Any] = {}
 
-    print("✅ PARAGON System: New loader + scoring engine active.")
-    ENGINE_AVAILABLE = True
+if not MOCK_PROFILES_NO_HYDRATE:
+    try:
+        # NEW engine paths
+        from etl.metric_loader import load_metrics_for
+        from etl.scoring_engine import score_metrics
 
-    # Load all metric bundles for every politician ID (optional, can stay empty)
-    RAW_EVIDENCE: Dict[str, Any] = {}
+        if not MOCK_PROFILES_QUIET:
+            print("PARAGON System: New loader + scoring engine active.")
 
-    # Example: preload for IDs that exist in the mock dataset
-    # We dynamically detect IDs in the profiles later at hydration time,
-    # so here we only set up the container.
-except ImportError:
-    print("⚠️ PARAGON System: Engine files not found. Running in Offline Mode.")
-    ENGINE_AVAILABLE = False
-    RAW_EVIDENCE = {}
-except Exception as e:
-    print(f"⚠️ PARAGON System: Error loading metrics: {e}")
-    ENGINE_AVAILABLE = False
-    RAW_EVIDENCE = {}
+        ENGINE_AVAILABLE = True
+
+    except ImportError:
+        if not MOCK_PROFILES_QUIET:
+            print("PARAGON System: Engine files not found. Running in Offline Mode.")
+        ENGINE_AVAILABLE = False
+
+    except Exception as e:
+        if not MOCK_PROFILES_QUIET:
+            print(f"PARAGON System: Error loading metrics: {e}")
+        ENGINE_AVAILABLE = False
 
 # =====================================================================================
 # HELPER GENERATORS

@@ -236,7 +236,6 @@ në kuadër të legjislaturës 2025.""",
 # =============================================================================
 # ... your data blocks here unchanged ...
 
-
 # =====================================================================================
 # 4. HYDRATION LOGIC (ENGINE WINS)
 # =====================================================================================
@@ -271,9 +270,9 @@ def hydrate_profiles_with_engine(profiles: List[VipProfile]) -> None:
         metrics_bundle = None
 
         # 1) Prefer preloaded RAW_EVIDENCE (support both raw string id and int id keys)
-        if RAW_EVIDENCE.get(raw_pid):
+        if RAW_EVIDENCE.get(raw_pid) is not None:
             metrics_bundle = RAW_EVIDENCE[raw_pid]
-        elif RAW_EVIDENCE.get(pid_int):
+        elif RAW_EVIDENCE.get(pid_int) is not None:
             metrics_bundle = RAW_EVIDENCE[pid_int]
         else:
             # 2) Load evidence on demand via metric_loader (expects int id)
@@ -304,8 +303,17 @@ def hydrate_profiles_with_engine(profiles: List[VipProfile]) -> None:
 
 
 # =====================================================================================
-# 5. FINAL EXPORT: COMBINE ALL PROFILES
+# 5. FINAL EXPORT (MUST BE LAST)
 # =====================================================================================
+
+# Hard fail early if a dataset block got moved/removed accidentally
+_required = ("mock_political_profiles_data", "mock_media_profiles_data", "mock_business_profiles_data")
+_missing = [n for n in _required if n not in globals()]
+if _missing:
+    raise NameError(
+        f"mock_profiles.py is mis-ordered or incomplete. Missing dataset list(s): {_missing}. "
+        f"Ensure dataset blocks are defined BEFORE PROFILES."
+    )
 
 PROFILES: List[VipProfile] = (
     mock_political_profiles_data
@@ -313,4 +321,7 @@ PROFILES: List[VipProfile] = (
     + mock_business_profiles_data
 )
 
-hydrate_profiles_with_engine(PROFILES)
+# Option A: hydrate only when explicitly allowed
+if not MOCK_PROFILES_NO_HYDRATE:
+    hydrate_profiles_with_engine(PROFILES)
+

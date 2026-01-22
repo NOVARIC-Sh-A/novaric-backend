@@ -1,244 +1,148 @@
+# routers/politicians.py
 from __future__ import annotations
 
-import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
+from fastapi import APIRouter, Query
 
-from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel, Field
+from etl.politician_map import (
+    POLITICIAN_ID_MAP,
+    POLITICIAN_ID_MAP_NORMALIZED,
+    POLITICIAN_META,
+    normalize_name,
+)
 
-# Optional: use your Albanian-safe normalizer + static map
-try:
-    from etl.politician_map import normalize_name, POLITICIAN_ID_MAP_NORMALIZED
-except Exception:
-    normalize_name = None
-    POLITICIAN_ID_MAP_NORMALIZED = {}
+from utils.data_loader import load_profiles_data
 
-# Supabase client (adapt to your existing utils/supabase_client.py)
-def _get_supabase():
-    """
-    Tries common patterns used in this codebase:
-    - utils.supabase_client.supabase (a ready client)
-    - utils.supabase_client.get_supabase_client() (factory)
-    """
-    try:
-        from utils.supabase_client import supabase  # type: ignore
-        return supabase
-    except Exception:
-        pass
+router = APIRouter(prefix="/politicians", tags=["politicians"])
 
-    try:
-        from utils.supabase_client import get_supabase_client  # type: ignore
-        return get_supabase_client()
-    except Exception as e:
-        raise RuntimeError(
-            "Supabase client not available. Ensure utils/supabase_client.py exposes "
-            "`supabase` or `get_supabase_client()`."
-        ) from e
+DEFAULT_AVATAR = "https://novaric.co/wp-content/uploads/2025/11/MaleProfile.jpg"
 
 
-router = APIRouter(tags=["politicians"])
-
-
-# ============================================================
-# Response models
-# ============================================================
-
-class PoliticianCard(BaseModel):
-    """
-    Frontend-friendly card model (VipProfile-compatible fields).
-    This is what your PoliticiansPage needs.
-    """
-    id: str
-    name: str
-    imageUrl: Optional[str] = None
-    category: str = Field(default="Politikë")
-    shortBio: Optional[str] = None
-    detailedBio: Optional[str] = None
-    dynamicScore: int = 0
-
-    # Optional fields your UI might already use
-    clickCount: int = 0
-    zodiacSign: Optional[str] = None
-
-
-class ResolveResponse(BaseModel):
-    politician_id: Optional[int] = None
-
-
-# ============================================================
-# Helpers
-# ============================================================
-
-def _vip_id_from_int(pid: int) -> str:
+def _as_str_id(pid: int) -> str:
+    # Frontend profiles use string IDs (vip1..vip100) in many places
     return f"vip{pid}"
 
-def _party_category(party: Optional[str]) -> str:
-    p = (party or "").strip()
-    if not p:
-        return "Politikë"
-    return f"Politikë ({p})"
 
-def _fallback_short_bio(role: Optional[str], party: Optional[str]) -> str:
-    role_txt = (role or "").strip()
-    if role_txt:
-        return role_txt
-    p = (party or "").strip()
-    if p:
-        return f"Figurë politike në Shqipëri ({p})."
-    return "Figurë politike në Shqipëri."
-
-def _extract_pid_from_query(query: str) -> Optional[int]:
-    """
-    Supports:
-    - vip1, VIP1, mp12 etc. -> 1, 12
-    - plain digits -> int
-    """
-    q = (query or "").strip()
-    if not q:
+def _safe_int(x: Any) -> Optional[int]:
+    try:
+        return int(x)
+    except Exception:
         return None
 
-    m = re.search(r"(\d+)$", q)
-    if m:
-        try:
-            return int(m.group(1))
-        except Exception:
-            return None
-    return None
+
+def _build_default_card(name: str, pid: int) -> Dict[str, Any]:
+    # Minimal VipProfile-like payload, compatible with PoliticiansPage filtering by category "Politikë"
+    return {
+        "id": _as_str_id(pid),
+        "name": name,
+        "imageUrl": DEFAULT_AVATAR,
+        "category": "Politikë (IND)",
+        "shortBio": "Profil në proces pasurimi nga NOVARIC® PARAGON Engine.",
+        "detailedBio": "",
+        "zodiacSign": None,
+        "dynamicScore": 0,
+    }
 
 
-# ============================================================
-# 1) GET /api/politicians/cards
-# ============================================================
+def _index_profiles_by_vip_id(profiles: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    out: Dict[str, Dict[str, Any]] = {}
+    for p in profiles or []:
+        pid = p.get("id")
+        if pid is None:
+            continue
+        out[str(pid)] = p
+    return out
 
-@router.get("/politicians/cards", response_model=List[PoliticianCard])
+
+def _index_profiles_by_name(profiles: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    out: Dict[str, Dict[str, Any]] = {}
+    for p in profiles or []:
+        name = p.get("name")
+        if not name:
+            continue
+        out[normalize_name(str(name))] = p
+    return out
+
+
+@router.get("/cards")
 def get_politician_cards(
-    include_profiles_overlay: bool = Query(
-        default=True,
-        description="If true, overlays fields from public.profiles when available (bio/image/category).",
-    ),
-    limit: int = Query(default=500, ge=1, le=5000),
-):
+    include_profiles: bool = Query(default=True, description="Merge fields from loaded profiles data if available"),
+) -> List[Dict[str, Any]]:
     """
-    Returns a complete list of politicians for the frontend PoliticiansPage.
-
-    Strategy (Option A):
-    - Base source of truth: public.politicians (canonical list)
-    - Optional overlay: public.profiles (if exists) to reuse bio/image/category/paragon fields
-      while still guaranteeing no politician is missing.
+    Option A:
+    - Always return the canonical politician list (100).
+    - Merge existing profile fields if found, but never drop missing politicians.
     """
-    supabase = _get_supabase()
-
-    # 1) Load politicians table
-    try:
-        pol_res = (
-            supabase.table("politicians")
-            .select("id,name,party,role,image_url")
-            .order("id", desc=False)
-            .limit(limit)
-            .execute()
-        )
-        politicians = pol_res.data or []
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to read politicians table: {e}")
-
-    # 2) Optional overlay from profiles table
-    profiles_by_vip_id: Dict[str, Dict[str, Any]] = {}
-    if include_profiles_overlay:
+    profiles_data: List[Dict[str, Any]] = []
+    if include_profiles:
         try:
-            # Pull only political profiles (cheap filter)
-            prof_res = (
-                supabase.table("profiles")
-                .select("id,name,imageUrl,category,shortBio,detailedBio,dynamicScore,clickCount,zodiacSign")
-                .ilike("category", "Politik%")
-                .limit(limit)
-                .execute()
-            )
-            for p in (prof_res.data or []):
-                pid = str(p.get("id") or "")
-                if pid:
-                    profiles_by_vip_id[pid] = p
+            profiles_data = load_profiles_data()
         except Exception:
-            # Overlay is best-effort; do not fail the endpoint
-            profiles_by_vip_id = {}
+            profiles_data = []
 
-    cards: List[PoliticianCard] = []
+    by_vip_id = _index_profiles_by_vip_id(profiles_data)
+    by_name = _index_profiles_by_name(profiles_data)
 
-    for row in politicians:
-        pid = int(row["id"])
-        vip_id = _vip_id_from_int(pid)
+    cards: List[Dict[str, Any]] = []
 
-        # Base fields from politicians
-        base_name = row.get("name") or f"Politician {pid}"
-        base_party = row.get("party")
-        base_role = row.get("role")
-        base_img = row.get("image_url")
+    # Ensure deterministic order by politician id
+    for name, pid in sorted(POLITICIAN_ID_MAP.items(), key=lambda kv: kv[1]):
+        card = _build_default_card(name=name, pid=pid)
 
-        # Overlay from profiles if exists
-        overlay = profiles_by_vip_id.get(vip_id)
+        vip_id = _as_str_id(pid)
+        p = by_vip_id.get(vip_id) or by_name.get(normalize_name(name))
 
-        cards.append(
-            PoliticianCard(
-                id=vip_id,
-                name=(overlay.get("name") if overlay else base_name) or base_name,
-                imageUrl=(overlay.get("imageUrl") if overlay else base_img) or base_img,
-                category=(overlay.get("category") if overlay else _party_category(base_party)) or _party_category(base_party),
-                shortBio=(overlay.get("shortBio") if overlay else None) or _fallback_short_bio(base_role, base_party),
-                detailedBio=(overlay.get("detailedBio") if overlay else None),
-                dynamicScore=int((overlay.get("dynamicScore") if overlay else 0) or 0),
-                clickCount=int((overlay.get("clickCount") if overlay else 0) or 0),
-                zodiacSign=(overlay.get("zodiacSign") if overlay else None),
-            )
-        )
+        if p:
+            # Merge “known-good” profile fields if they exist
+            # (Keep defaults if missing)
+            card["id"] = str(p.get("id", card["id"]))
+            card["name"] = p.get("name", card["name"])
+            card["imageUrl"] = p.get("imageUrl", card["imageUrl"])
+            card["category"] = p.get("category", card["category"])
+            card["shortBio"] = p.get("shortBio", card["shortBio"])
+            card["detailedBio"] = p.get("detailedBio", card["detailedBio"])
+            card["zodiacSign"] = p.get("zodiacSign", card["zodiacSign"])
+            card["dynamicScore"] = p.get("dynamicScore", card["dynamicScore"])
+
+        cards.append(card)
 
     return cards
 
 
-# ============================================================
-# 2) GET /api/politicians/resolve?query=
-# ============================================================
-
-@router.get("/politicians/resolve", response_model=ResolveResponse)
+@router.get("/resolve")
 def resolve_politician_id(
-    query: str = Query(..., min_length=1, description="vipX, numeric ID, or name"),
-):
+    query: str = Query(..., description="Name (Albanian-safe) or vipX"),
+) -> Dict[str, Optional[int]]:
     """
-    Resolves a query to a numeric politician_id.
+    Returns a numeric politician_id for PARAGON recompute.
 
-    Resolution order:
-    1) vipX / trailing digits -> int
-    2) static normalized map (etl/politician_map.py) if available
-    3) Supabase lookup by name (ilike) in public.politicians
+    Examples:
+      - query=Edi%20Rama -> 1
+      - query=vip1 -> 1
+      - query=Vip100 -> 100
     """
-    q = (query or "").strip()
-    if not q:
-        return ResolveResponse(politician_id=None)
+    if not query:
+        return {"politician_id": None}
 
-    # 1) vipX or trailing digits
-    pid = _extract_pid_from_query(q)
-    if pid is not None:
-        return ResolveResponse(politician_id=pid)
+    q = query.strip()
 
-    # 2) static normalized map (fast, deterministic)
-    if normalize_name and POLITICIAN_ID_MAP_NORMALIZED:
-        n = normalize_name(q)
-        pid2 = POLITICIAN_ID_MAP_NORMALIZED.get(n)
-        if pid2 is not None:
-            return ResolveResponse(politician_id=int(pid2))
+    # vipX pattern support
+    import re
+    m = re.search(r"vip(\d+)$", q, flags=re.IGNORECASE)
+    if m:
+        pid = _safe_int(m.group(1))
+        return {"politician_id": pid}
 
-    # 3) DB lookup by name
-    supabase = _get_supabase()
-    try:
-        res = (
-            supabase.table("politicians")
-            .select("id,name")
-            .ilike("name", f"%{q}%")
-            .limit(1)
-            .execute()
-        )
-        rows = res.data or []
-        if rows:
-            return ResolveResponse(politician_id=int(rows[0]["id"]))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Resolve failed: {e}")
+    # normalized name lookup
+    norm = normalize_name(q)
+    pid = POLITICIAN_ID_MAP_NORMALIZED.get(norm)
 
-    return ResolveResponse(politician_id=None)
+    # Try a loose fallback: match against canonical names normalized
+    if pid is None:
+        # attempt partial match if user passes "rama" etc.
+        for key, v in POLITICIAN_ID_MAP_NORMALIZED.items():
+            if norm and norm in key:
+                pid = v
+                break
+
+    return {"politician_id": pid}

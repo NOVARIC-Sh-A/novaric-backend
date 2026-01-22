@@ -294,11 +294,13 @@ në kuadër të legjislaturës 2025.""",
 # Recommended: put your large dataset blocks in mock_profiles_data.py
 # and keep them "unchanged" there.
 try:
-    from mock_profiles_data import (  # type: ignore
-        mock_business_profiles_data,
-        mock_media_profiles_data,
-        mock_political_profiles_data,
-    )
+    from mock_profiles_data import (
+    POLITICIAN_NAME_TO_ID,
+    mock_political_profiles_data,
+    mock_media_profiles_data,
+    mock_business_profiles_data,
+)
+
 except Exception as e:
     # Safe fallback: the module isn't present or failed to import.
     # We do NOT hard-crash here because you may want to run the app without fixtures.

@@ -17,6 +17,10 @@ Design goals:
 - Trust scoring & governance
 - Geographic & topical segmentation
 - One-feed-one-article compatibility
+
+Notes (practical reliability):
+- Removed Reuters legacy RSS and AP invalid path that commonly return HTML/redirects.
+- Prefer HTTPS canonical endpoints.
 """
 
 from __future__ import annotations
@@ -71,14 +75,17 @@ def _meta(
 FEED_META: Dict[str, FeedMeta] = {
 
     # ---------------- Tier 1 – Global ----------------
-    "http://feeds.bbci.co.uk/news/rss.xml":
+    "https://feeds.bbci.co.uk/news/rss.xml":
         _meta("BBC News", 95, 1.15, 1, "global", "general", "politics"),
-    "http://feeds.bbci.co.uk/news/world/rss.xml":
+    "https://feeds.bbci.co.uk/news/world/rss.xml":
         _meta("BBC World", 95, 1.15, 1, "global", "general", "politics"),
-    "http://feeds.reuters.com/reuters/worldNews":
-        _meta("Reuters World", 97, 1.20, 1, "global", "general", "politics", "economy"),
-    "https://apnews.com/feed/rss":
-        _meta("AP News", 94, 1.10, 1, "global", "general", "politics"),
+
+    # Reuters legacy RSS removed (often redirects/blocks or returns non-RSS HTML)
+    # "http://feeds.reuters.com/reuters/worldNews": ...
+
+    # AP invalid RSS path removed (typically not RSS XML)
+    # "https://apnews.com/feed/rss": ...
+
     "https://rss.dw.com/xml/rss-en-all":
         _meta("Deutsche Welle", 92, 1.00, 1, "global", "general", "politics"),
     "https://www.france24.com/en/rss":
@@ -96,7 +103,7 @@ FEED_META: Dict[str, FeedMeta] = {
     "https://euobserver.com/rss":
         _meta("EUobserver", 85, 0.90, 2, "europe", "politics"),
     "https://feeds.skynews.com/feeds/rss/world.xml":
-        _meta("Sky News World", 76, 0.78, 2, "europe", "general"),
+        _meta("Sky News World", 76, 0.78, 2, "europe", "general", "politics"),
 
     # ---------------- Tier 2 – Balkans ----------------
     "https://balkaninsight.com/feed/":
@@ -108,11 +115,17 @@ FEED_META: Dict[str, FeedMeta] = {
     "https://euronews.al/feed":
         _meta("Euronews Albania", 72, 0.82, 2, "albania", "general", "politics"),
     "https://reporter.al/feed/":
-        _meta("Reporter.al", 83, 0.92, 2, "albania", "general", "judiciary"),
+        _meta("Reporter.al", 83, 0.92, 2, "albania", "general", "politics", "judiciary"),
+
+    # ---------------- Global secondary (reliable RSS) ----------------
+    "https://feeds.npr.org/1004/rss.xml":
+        _meta("NPR World", 88, 0.95, 2, "global", "general", "politics"),
+    "https://www.cbsnews.com/latest/rss/world":
+        _meta("CBS News World", 82, 0.88, 2, "global", "general", "politics"),
 
     # ---------------- Media analysis ----------------
     "https://www.theguardian.com/media/rss":
-        _meta("Guardian Media", 88, 0.95, 2, "global", "media"),
+        _meta("The Guardian – Media", 88, 0.95, 2, "global", "media"),
     "https://www.niemanlab.org/feed/":
         _meta("Nieman Lab", 86, 0.92, 2, "global", "media"),
 
@@ -153,10 +166,8 @@ def get_feed_meta(url: str) -> FeedMeta:
 # ==============================================================
 
 TIER1_GLOBAL_NEWS: List[str] = [
-    "http://feeds.bbci.co.uk/news/rss.xml",
-    "http://feeds.bbci.co.uk/news/world/rss.xml",
-    "http://feeds.reuters.com/reuters/worldNews",
-    "https://apnews.com/feed/rss",
+    "https://feeds.bbci.co.uk/news/rss.xml",
+    "https://feeds.bbci.co.uk/news/world/rss.xml",
     "https://rss.dw.com/xml/rss-en-all",
     "https://www.france24.com/en/rss",
     "https://www.aljazeera.com/xml/rss/all.xml",
@@ -195,6 +206,7 @@ POLITICAL_RELEVANCE_FEEDS: List[str] = (
     + EUROPEAN_FEEDS
     + BALKAN_REGIONAL_FEEDS
     + ALBANIAN_MEDIA_FEEDS
+    + GLOBAL_SECONDARY_FEEDS
 )
 
 MEDIA_PROFILE_SCRAPER_FEEDS: List[str] = [
@@ -314,3 +326,30 @@ def feed_priority_score(url: str) -> float:
     }.get(meta.region, 1.00)
 
     return base * tier_factor * region_factor
+
+
+# ==============================================================
+# 9. OPTIONAL: SANITY CHECK (import-time safe)
+# ==============================================================
+
+def validate_feed_registry(strict: bool = False) -> List[str]:
+    """
+    Returns a list of warnings.
+
+    strict=False:
+      - warn if a feed in groups is missing from FEED_META
+
+    strict=True:
+      - raise ValueError on missing meta
+    """
+    warnings: List[str] = []
+    all_grouped = set(ALL_RSS_FEEDS)
+
+    missing_meta = sorted([u for u in all_grouped if u not in FEED_META])
+    if missing_meta:
+        msg = f"Missing FEED_META entries for: {missing_meta}"
+        if strict:
+            raise ValueError(msg)
+        warnings.append(msg)
+
+    return warnings

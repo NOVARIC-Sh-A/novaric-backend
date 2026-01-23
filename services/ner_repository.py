@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Optional
 
 from services.ner_config import NerResult, NerBreakdown
-from utils.supabase_client import supabase, is_supabase_configured
+from utils.supabase_client import supabase, is_supabase_configured, supabase_upsert
 
 
 # ============================================================
@@ -79,20 +79,24 @@ def save_snapshot(
         return
 
     try:
-        supabase.table("ner_snapshots").insert(
-            {
-                "article_id": article_id,
-                "feed_url": feed_url,
-                "published_ts": published_ts,
-                "ecosystem_rating": ner.ecosystemRating,
-                "ner_version": ner.nerVersion,
-                "srs": ner.breakdown.SRS,
-                "cis": ner.breakdown.CIS,
-                "csc": ner.breakdown.CSC,
-                "trf": ner.breakdown.TRF,
-                "ecm": ner.breakdown.ECM,
-            }
-        ).execute()
+        supabase_upsert(
+            table="ner_snapshots",
+            records=[
+                {
+                    "article_id": article_id,
+                    "feed_url": feed_url,
+                    "published_ts": published_ts,
+                    "ecosystem_rating": ner.ecosystemRating,
+                    "ner_version": ner.nerVersion,
+                    "srs": ner.breakdown.SRS,
+                    "cis": ner.breakdown.CIS,
+                    "csc": ner.breakdown.CSC,
+                    "trf": ner.breakdown.TRF,
+                    "ecm": ner.breakdown.ECM,
+                }
+            ],
+            conflict_col="article_id",
+        )
     except Exception:
         # Intentionally swallowed: storage must never block NER
         return

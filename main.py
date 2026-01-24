@@ -87,7 +87,7 @@ except Exception as e:
 # SIMPLE IN-MEMORY TTL CACHE
 # ================================================================
 _NEWS_CACHE: Dict[str, Dict[str, object]] = {}
-_NEWS_CACHE_TTL_SECONDS = int(os.getenv("NEWS_CACHE_TTL_SECONDS", "300"))
+_NEWS_CACHE_TTL_SECONDS = int(os.getenv("NEWS_CACHE_TTL_SECONDS", "30"))
 
 # ================================================================
 # FASTAPI APP

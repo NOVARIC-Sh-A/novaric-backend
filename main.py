@@ -3,7 +3,10 @@
 # ================================================================
 import rss_feeds_adapter  # activates weighted feeds globally
 
+from __future__ import annotations
+
 import os
+import sys
 import time
 import logging
 import re
@@ -13,27 +16,49 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import feedparser
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.openapi.docs import get_swagger_ui_html
-from fastapi.responses import Response
+from fastapi.responses import Response, JSONResponse
 from pydantic import BaseModel
+
+# ================================================================
+# STDOUT/STDERR FLUSH (CLOUD RUN FRIENDLY)
+# ================================================================
+# Cloud Run captures stdout/stderr. If buffering occurs (e.g., gunicorn workers),
+# prints/logs may not appear. These settings improve log visibility.
+try:
+    os.environ.setdefault("PYTHONUNBUFFERED", "1")
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(line_buffering=True)
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(line_buffering=True)
+except Exception:
+    pass
 
 # ================================================================
 # LOGGING (BOOT FIRST)
 # ================================================================
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
-)
+# Ensure logs go to stdout (Cloud Run). Avoid duplicate handlers.
+_root = logging.getLogger()
+if not _root.handlers:
+    logging.basicConfig(
+        level=os.getenv("LOG_LEVEL", "INFO").upper(),
+        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+        handlers=[logging.StreamHandler(sys.stdout)],
+    )
+else:
+    _root.setLevel(os.getenv("LOG_LEVEL", "INFO").upper())
+
 logger = logging.getLogger("novaric-backend")
+logger.propagate = True
 logger.info("NOVARIC backend boot sequence started")
 
 # ================================================================
 # DATA LOADER (LEGACY COMPATIBILITY)
 # ================================================================
-from utils.data_loader import load_profiles_data
+from utils.data_loader import load_profiles_data  # noqa: E402
 
 # ================================================================
 # ROUTERS (GUARDED IMPORTS — DO NOT BLOCK SERVER START)
@@ -43,28 +68,31 @@ enrichment_router = None
 politicians_router = None
 
 try:
-    from paragon_api import router as paragon_router  # type: ignore
+    from paragon_api import router as paragon_router  # type: ignore  # noqa: E402
+
     logger.info("PARAGON router loaded")
 except Exception as e:
-    logger.error(f"Failed to load PARAGON router (startup continues): {e}")
+    logger.exception("Failed to load PARAGON router (startup continues): %s", e)
 
 try:
-    from routers.profile_enrichment import router as enrichment_router  # type: ignore
+    from routers.profile_enrichment import router as enrichment_router  # type: ignore  # noqa: E402
+
     logger.info("Enrichment router loaded")
 except Exception as e:
-    logger.error(f"Failed to load enrichment router (startup continues): {e}")
+    logger.exception("Failed to load enrichment router (startup continues): %s", e)
 
 # 🔑 OPTION A: politicians cards API
 try:
-    from routers.politicians import router as politicians_router  # type: ignore
+    from routers.politicians import router as politicians_router  # type: ignore  # noqa: E402
+
     logger.info("Politicians router loaded")
 except Exception as e:
-    logger.warning(f"Politicians router not loaded yet: {e}")
+    logger.warning("Politicians router not loaded yet: %s", e)
 
 # ================================================================
 # FEED REGISTRY
 # ================================================================
-from config.rss_feeds import (
+from config.rss_feeds import (  # noqa: E402
     get_feeds_for_news_category,
     BALKAN_REGIONAL_FEEDS,
     ALBANIAN_MEDIA_FEEDS,
@@ -74,14 +102,15 @@ from config.rss_feeds import (
 # NER (NOVARIC ECOSYSTEM RATING)
 # ================================================================
 try:
-    from services.ner_engine import compute_ner  # type: ignore
-    from services.ner_repository import get_snapshot, save_snapshot  # type: ignore
+    from services.ner_engine import compute_ner  # type: ignore  # noqa: E402
+    from services.ner_repository import get_snapshot, save_snapshot  # type: ignore  # noqa: E402
+
     logger.info("NER engine loaded")
 except Exception as e:
     compute_ner = None
     get_snapshot = None
     save_snapshot = None
-    logger.warning(f"NER disabled (startup continues): {e}")
+    logger.warning("NER disabled (startup continues): %s", e)
 
 # ================================================================
 # SIMPLE IN-MEMORY TTL CACHE
@@ -101,17 +130,27 @@ app = FastAPI(
 )
 
 # ================================================================
+# GLOBAL EXCEPTION LOGGING (DOES NOT CHANGE RESPONSE CONTRACTS)
+# ================================================================
+# This ensures unexpected exceptions are visible in Cloud Run logs,
+# even when upstream code catches and returns generic 500 messages.
+@app.middleware("http")
+async def _log_unhandled_exceptions(request: Request, call_next):
+    try:
+        return await call_next(request)
+    except Exception as e:
+        # Log full stack trace server-side; keep client response generic.
+        logger.exception("Unhandled exception: %s %s | %s", request.method, request.url.path, e)
+        return JSONResponse(status_code=500, content={"detail": "Internal Server Error"})
+
+# ================================================================
 # ROUTE INTROSPECTION (DEBUG)
 # ================================================================
 @app.get("/__routes", include_in_schema=False)
 def list_routes():
     return sorted(
         [
-            {
-                "path": r.path,
-                "methods": list(getattr(r, "methods", [])),
-                "name": r.name,
-            }
+            {"path": r.path, "methods": list(getattr(r, "methods", [])), "name": r.name}
             for r in app.router.routes
             if hasattr(r, "path")
         ],
@@ -284,7 +323,7 @@ async def get_news(category: str = Query(default="all")):
                 )
             return out
         except Exception as e:
-            logger.warning(f"Feed parse failed: {feed_url} | {e}")
+            logger.warning("Feed parse failed: %s | %s", feed_url, e)
             return []
 
     raw: List[dict] = []
@@ -306,8 +345,22 @@ async def get_news(category: str = Query(default="all")):
         t = (title or "").lower()
         tokens = re.findall(r"[a-zA-ZÀ-ž0-9']+", t)
         stop = {
-            "the", "and", "or", "of", "to", "in", "a", "an", "for", "on", "with",
-            "nga", "dhe", "ose", "ne", "per",
+            "the",
+            "and",
+            "or",
+            "of",
+            "to",
+            "in",
+            "a",
+            "an",
+            "for",
+            "on",
+            "with",
+            "nga",
+            "dhe",
+            "ose",
+            "ne",
+            "per",
         }
         core = [x for x in tokens if len(x) >= 4 and x not in stop]
         return set(core[:20])
@@ -354,6 +407,7 @@ async def get_news(category: str = Query(default="all")):
 
     try:
         from utils.supabase_client import supabase, is_supabase_configured  # type: ignore
+
         supabase_ok = bool(supabase and is_supabase_configured())
     except Exception:
         supabase_ok = False
@@ -383,7 +437,9 @@ async def get_news(category: str = Query(default="all")):
                     if aid:
                         snapshots_by_article_id[aid] = row
         except Exception as e:
-            logger.warning(f"Batch snapshot fetch failed (will use per-article snapshot/compute): {e}")
+            logger.warning(
+                "Batch snapshot fetch failed (will use per-article snapshot/compute): %s", e
+            )
             snapshots_by_article_id = {}
 
     # ------------------------------------------------------------
@@ -505,7 +561,7 @@ async def get_news(category: str = Query(default="all")):
             )
 
         except Exception as e:
-            logger.warning(f"NER compute/persist failed for {article_id}: {e}")
+            logger.warning("NER compute/persist failed for %s: %s", article_id, e)
             a.ecosystemRating = None
             a.nerVersion = "ner_v1.0"
             a.nerBreakdown = {**_base_breakdown(), "error": True}
@@ -537,7 +593,18 @@ if politicians_router:
 # ================================================================
 @app.on_event("startup")
 def startup_event():
+    # Add a quick env sanity log (non-secret booleans only)
     logger.info("NOVARIC Backend started successfully.")
+    try:
+        supabase_url_set = bool(os.getenv("SUPABASE_URL"))
+        supabase_service_role_set = bool(os.getenv("SUPABASE_SERVICE_ROLE_KEY"))
+        logger.info(
+            "ENV: SUPABASE_URL set=%s | SUPABASE_SERVICE_ROLE_KEY set=%s",
+            supabase_url_set,
+            supabase_service_role_set,
+        )
+    except Exception:
+        pass
 
 
 @app.on_event("shutdown")

@@ -1,10 +1,9 @@
 # services/ner_engine.py
 from __future__ import annotations
 
-import math
 import re
 from datetime import datetime, timezone
-from typing import Iterable, List, Tuple
+from typing import Iterable, List
 
 from config.rss_feeds import get_feed_meta
 from services.ner_config import NER_WEIGHTS, NerBreakdown, NerResult
@@ -19,18 +18,37 @@ _CLICKBAIT_PATTERNS = [
     r"\bunbelievable\b",
 ]
 
+
 def _clamp_int(x: float, lo: int = 0, hi: int = 100) -> int:
     return int(max(lo, min(hi, round(x))))
 
+
 def _safe_parse_datetime(ts: str) -> datetime | None:
+    """
+    Supports:
+    - ISO 8601 (e.g. 2025-12-18T12:34:56+00:00 or ...Z)
+    - RFC822 (common RSS/Atom published strings, e.g. "Sat, 24 Jan 2026 08:48:40 GMT")
+    """
     if not ts:
         return None
-    # feedparser often returns RFC822; your API stores strings. We'll try ISO first, then fallback.
+
+    # 1) ISO 8601 first
     try:
-        # Handles "2025-12-18T12:34:56+00:00"
         return datetime.fromisoformat(ts.replace("Z", "+00:00"))
     except Exception:
+        pass
+
+    # 2) RFC822 fallback (RSS/Atom)
+    try:
+        from email.utils import parsedate_to_datetime  # stdlib
+
+        dt = parsedate_to_datetime(ts)
+        if dt is None:
+            return None
+        return dt
+    except Exception:
         return None
+
 
 # ---------------------------
 # SRS — Source Reliability
@@ -40,6 +58,7 @@ def compute_srs(feed_url: str) -> int:
     # Base trust score with small tier adjustment
     tier_bonus = {1: 8, 2: 3, 3: -5}.get(meta.tier, 0)
     return _clamp_int(meta.trust_score + tier_bonus)
+
 
 # ---------------------------
 # CIS — Content Integrity
@@ -92,6 +111,7 @@ def compute_cis(title: str, summary: str) -> int:
 
     return _clamp_int(score)
 
+
 # ---------------------------
 # TRF — Temporal Relevance
 # Deterministic decay by age
@@ -103,6 +123,8 @@ def compute_trf(published_ts: str, now_utc: datetime) -> int:
 
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt = dt.astimezone(timezone.utc)
 
     age_hours = (now_utc - dt).total_seconds() / 3600.0
     if age_hours < 0:
@@ -118,6 +140,7 @@ def compute_trf(published_ts: str, now_utc: datetime) -> int:
         return 40
     return 20
 
+
 # ---------------------------
 # CSC — Cross-Source Corroboration
 # Deterministic clustering by title token overlap
@@ -128,6 +151,7 @@ def _fingerprint_title(title: str) -> set[str]:
     stop = {"the", "and", "or", "of", "to", "in", "a", "an", "for", "on", "with", "nga", "dhe", "ose", "ne", "per"}
     core = [x for x in tokens if len(x) >= 4 and x not in stop]
     return set(core[:20])  # cap for stability
+
 
 def compute_csc(current_title: str, peer_titles: Iterable[str]) -> int:
     fp = _fingerprint_title(current_title)
@@ -156,6 +180,7 @@ def compute_csc(current_title: str, peer_titles: Iterable[str]) -> int:
         return 86
     return 92
 
+
 # ---------------------------
 # ECM — Ecosystem Context Multiplier
 # Deterministic, low-impact modifier
@@ -168,6 +193,7 @@ def compute_ecm(source_type: str) -> float:
     if source_type == "balkan":
         return 1.04
     return 1.00
+
 
 # ---------------------------
 # NER — Final aggregation

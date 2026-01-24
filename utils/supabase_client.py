@@ -32,12 +32,71 @@ except Exception:
 # ----------------------------------------------------
 # Environment configuration
 # ----------------------------------------------------
-SUPABASE_URL: str = (os.getenv("SUPABASE_URL") or "").strip()
-SUPABASE_SERVICE_ROLE_KEY: str = (os.getenv("SUPABASE_SERVICE_ROLE_KEY") or "").strip()
-SUPABASE_ANON_KEY: str = (os.getenv("SUPABASE_ANON_KEY") or "").strip()
+# NOTE:
+# We keep the original env names, but also tolerate common misconfigurations
+# (e.g. truncated variable name in Cloud Run: SUPABASE_SERVICE_ROLE_KE).
+def _env_first(*names: str) -> str:
+    for n in names:
+        v = (os.getenv(n) or "").strip()
+        if v:
+            return v
+    return ""
+
+
+SUPABASE_URL: str = _env_first("SUPABASE_URL")
+
+# service role key can be misnamed in some deployments; tolerate safely
+SUPABASE_SERVICE_ROLE_KEY: str = _env_first(
+    "SUPABASE_SERVICE_ROLE_KEY",
+    "SUPABASE_SERVICE_ROLE_KE",  # common truncation typo
+    "SUPABASE_SERVICE_KEY",      # occasional alternative naming
+)
+
+SUPABASE_ANON_KEY: str = _env_first(
+    "SUPABASE_ANON_KEY",
+    "SUPABASE_KEY",  # some stacks export anon as SUPABASE_KEY
+)
 
 # Prefer SERVICE ROLE key for server-side writes
 SUPABASE_KEY: str = SUPABASE_SERVICE_ROLE_KEY or SUPABASE_ANON_KEY
+
+
+# ----------------------------------------------------
+# Supabase URL sanity checks (prevents "YOUR_SUPABASE_URL" failures)
+# ----------------------------------------------------
+def _looks_like_placeholder(url: str) -> bool:
+    u = (url or "").strip().lower()
+    return (
+        not u
+        or u in {"your_supabase_url", "supabase_url", "http://your_supabase_url", "https://your_supabase_url"}
+        or "your_supabase_url" in u
+    )
+
+
+def _has_scheme(url: str) -> bool:
+    u = (url or "").strip().lower()
+    return u.startswith("http://") or u.startswith("https://")
+
+
+def _validate_supabase_url(url: str) -> str:
+    """
+    Keeps behavior Cloud Run–safe (no import-time crash),
+    but prevents invalid requests URLs like "YOUR_SUPABASE_URL/rest/v1/...".
+    """
+    u = (url or "").strip()
+    if not u:
+        return ""
+    if _looks_like_placeholder(u):
+        return ""
+    if not _has_scheme(u):
+        # treat as invalid (avoid requests "No scheme supplied")
+        return ""
+    return u.rstrip("/")
+
+
+# Normalize once
+SUPABASE_URL = _validate_supabase_url(SUPABASE_URL)
+
 
 # ----------------------------------------------------
 # supabase-py client (optional)
@@ -56,15 +115,40 @@ except Exception:
 # ----------------------------------------------------
 _session = requests.Session()
 
+# Optional: slightly more resilient networking without changing call-sites.
+# (No extra dependency; uses requests only.)
+try:
+    from requests.adapters import HTTPAdapter
+    from urllib3.util.retry import Retry
+
+    _retry = Retry(
+        total=2,
+        connect=2,
+        read=2,
+        backoff_factor=0.4,
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods=frozenset({"GET", "POST", "PATCH"}),
+        raise_on_status=False,
+    )
+    _adapter = HTTPAdapter(max_retries=_retry, pool_connections=10, pool_maxsize=10)
+    _session.mount("https://", _adapter)
+    _session.mount("http://", _adapter)
+except Exception:
+    # If urllib3 Retry is unavailable for any reason, continue without retries.
+    pass
+
 
 def is_supabase_configured() -> bool:
+    # IMPORTANT:
+    # Must be true only when URL is valid and key is present.
     return bool(SUPABASE_URL and SUPABASE_KEY)
 
 
 def _ensure_config() -> None:
     if not SUPABASE_URL:
         raise RuntimeError(
-            "SUPABASE_URL is missing. Set it in .env (local) or Cloud Run environment variables."
+            "SUPABASE_URL is missing or invalid. "
+            "Set SUPABASE_URL to something like: https://<project-ref>.supabase.co"
         )
     if not SUPABASE_KEY:
         raise RuntimeError(
@@ -74,7 +158,8 @@ def _ensure_config() -> None:
 
 def _rest_url() -> str:
     _ensure_config()
-    return f"{SUPABASE_URL.rstrip('/')}/rest/v1"
+    # SUPABASE_URL is already rstrip("/") in _validate_supabase_url
+    return f"{SUPABASE_URL}/rest/v1"
 
 
 def _headers(*, prefer: Optional[str] = None) -> Dict[str, str]:
@@ -106,6 +191,16 @@ def _try_parse_error(resp: requests.Response) -> Tuple[Optional[str], str]:
 
 
 # ----------------------------------------------------
+# INTERNAL: safer json parsing for list/object responses
+# ----------------------------------------------------
+def _try_json(resp: requests.Response) -> Any:
+    try:
+        return resp.json()
+    except Exception:
+        return None
+
+
+# ----------------------------------------------------
 # INTERNAL GET helper
 # ----------------------------------------------------
 def _get(path: str, params: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -118,10 +213,12 @@ def _get(path: str, params: Dict[str, Any]) -> List[Dict[str, Any]]:
     if resp.status_code >= 400:
         raise RuntimeError(f"Supabase GET error {resp.status_code}: {resp.text}")
 
-    data = resp.json()
+    data = _try_json(resp)
     if isinstance(data, list):
         return data
-    return [data]
+    if isinstance(data, dict):
+        return [data]
+    return []
 
 
 # ----------------------------------------------------
@@ -143,13 +240,12 @@ def _patch(table: str, where_params: Dict[str, str], payload: Dict[str, Any]) ->
     if resp.status_code >= 400:
         raise RuntimeError(f"Supabase PATCH failed [{resp.status_code}]: {resp.text}")
 
-    try:
-        data = resp.json()
-        if isinstance(data, list):
-            return data
+    data = _try_json(resp)
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
         return [data]
-    except Exception:
-        return []
+    return []
 
 
 # ----------------------------------------------------
@@ -173,10 +269,8 @@ def supabase_insert(table: str, records: List[Dict[str, Any]]) -> Any:
     if resp.status_code >= 400:
         raise RuntimeError(f"Supabase INSERT failed [{resp.status_code}]: {resp.text}")
 
-    try:
-        return resp.json()
-    except Exception:
-        return {"status": "ok"}
+    data = _try_json(resp)
+    return data if data is not None else {"status": "ok"}
 
 
 # ----------------------------------------------------
@@ -215,10 +309,8 @@ def supabase_upsert(
         raise RuntimeError("Unauthorized: SERVICE_ROLE_KEY invalid or missing.")
 
     if resp.status_code < 400:
-        try:
-            return resp.json()
-        except Exception:
-            return {"status": "ok"}
+        data = _try_json(resp)
+        return data if data is not None else {"status": "ok"}
 
     # ---- Handle failure cases
     err_code, raw = _try_parse_error(resp)

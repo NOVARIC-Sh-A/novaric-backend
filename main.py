@@ -1,9 +1,9 @@
+from __future__ import annotations
+
 # ================================================================
 # RSS FEED ADAPTER (MUST BE FIRST IMPORT)
 # ================================================================
 import rss_feeds_adapter  # activates weighted feeds globally
-
-from __future__ import annotations
 
 import os
 import sys
@@ -143,6 +143,7 @@ async def _log_unhandled_exceptions(request: Request, call_next):
         logger.exception("Unhandled exception: %s %s | %s", request.method, request.url.path, e)
         return JSONResponse(status_code=500, content={"detail": "Internal Server Error"})
 
+
 # ================================================================
 # ROUTE INTROSPECTION (DEBUG)
 # ================================================================
@@ -157,6 +158,7 @@ def list_routes():
         key=lambda x: x["path"],
     )
 
+
 # ================================================================
 # STATIC FILES
 # ================================================================
@@ -170,6 +172,7 @@ def favicon():
     with open("static/favicon.ico", "rb") as f:
         return Response(f.read(), media_type="image/x-icon")
 
+
 # ================================================================
 # CUSTOM SWAGGER
 # ================================================================
@@ -180,6 +183,7 @@ def custom_swagger_docs():
         title="NOVARIC® Backend API",
         swagger_favicon_url="/static/favicon.ico",
     )
+
 
 # ================================================================
 # CORS
@@ -610,3 +614,27 @@ def startup_event():
 @app.on_event("shutdown")
 def shutdown_event():
     logger.info("NOVARIC Backend stopped.")
+
+
+# ================================================================
+# ENTRYPOINT (CLOUD RUN COMPATIBLE)
+# ================================================================
+# Cloud Run requires the container to listen on 0.0.0.0:$PORT (PORT is injected).
+# This keeps local dev simple while remaining Cloud Run compliant.
+if __name__ == "__main__":
+    try:
+        import uvicorn  # type: ignore
+
+        port = int(os.getenv("PORT", "8080"))
+        logger.info("Starting uvicorn | host=0.0.0.0 | port=%s", port)
+
+        # If your filename is not main.py, change "main:app" accordingly.
+        uvicorn.run(
+            "main:app",
+            host="0.0.0.0",
+            port=port,
+            log_level=os.getenv("LOG_LEVEL", "info").lower(),
+        )
+    except Exception as e:
+        logger.exception("Failed to start server: %s", e)
+        raise

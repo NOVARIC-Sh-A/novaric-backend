@@ -12,7 +12,7 @@ from schemas import VipProfileResponse
 
 
 router = APIRouter(
-    prefix="/api",
+    prefix="",
     tags=["Profile Enrichment"]
 )
 

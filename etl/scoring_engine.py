@@ -4,18 +4,24 @@
 PARAGON Scoring Engine
 
 Converts unified metrics into:
-- 8 PARAGON dimensions (0–100 each)
+- 7 PARAGON dimensions (0–100 each) [official contract]
 - overall score (0–100)
 
 This implementation is defensive:
 - handles missing / malformed metric values
 - clamps numeric inputs into expected ranges
 - avoids division-by-zero in normalization
+
+Notes:
+- Momentum & Resilience is computed internally for future use, but it is NOT
+  returned as a PARAGON dimension to preserve the official 7-dimension contract.
 """
 
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any, Dict, List
+
+from utils.paragon_constants import PARAGON_DIMENSIONS
 
 
 # ------------------------------------------------------------
@@ -103,18 +109,66 @@ def _norm(key: str, value: Any, inverse: bool = False) -> float:
     return _clamp(score, 0.0, 100.0)
 
 
+def _order_dimensions(dims: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Ensure stable ordering and guaranteed presence of all 7 official dimensions.
+    Missing dimensions are filled with a neutral score (50).
+
+    Additional stability:
+    - clamps each score into 0..100
+    - tolerates duplicate names (last one wins)
+    """
+    by_name: Dict[str, Dict[str, Any]] = {}
+    for d in dims or []:
+        if not isinstance(d, dict):
+            continue
+
+        name = d.get("dimension")
+        if not isinstance(name, str) or not name:
+            continue
+
+        try:
+            score = int(d.get("score", 0) or 0)
+        except Exception:
+            score = 0
+
+        score = max(0, min(100, score))
+
+        by_name[name] = {
+            "dimension": name,
+            "score": score,
+        }
+
+    ordered: List[Dict[str, Any]] = []
+    for name in PARAGON_DIMENSIONS:
+        if name in by_name:
+            ordered.append(by_name[name])
+        else:
+            ordered.append({"dimension": name, "score": 50})
+
+    return ordered
+
+
 # =====================================================================
 # CORE SCORING ENGINE
 # =====================================================================
 def score_metrics(metrics: Dict[str, Any]) -> Dict[str, Any]:
     """
     Converts unified metrics into:
-        - 8 PARAGON dimensions
+        - 7 PARAGON dimensions (official contract)
         - overall score (0–100)
+
+    Returns:
+        {
+          "overall_score": int,
+          "dimensions": [{"dimension": str, "score": int}, ...],
+          # optional non-contract fields:
+          "momentum": {"raw": float, "score": int}
+        }
     """
 
     # ------------------------------
-    # 1. Integrity & Transparency
+    # 1. Accountability & Transparency (Integrity)
     # ------------------------------
     s_scandals = _norm("scandals_flagged", metrics.get("scandals_flagged", 0), inverse=True)
     s_wealth = _norm("wealth_declaration_issues", metrics.get("wealth_declaration_issues", 0), inverse=True)
@@ -125,7 +179,7 @@ def score_metrics(metrics: Dict[str, Any]) -> Dict[str, Any]:
     )
 
     # ------------------------------
-    # 2. Governance Strength
+    # 2. Governance & Institutional Strength
     # ------------------------------
     s_projects = _norm("public_projects_completed", metrics.get("public_projects_completed", 0))
     s_attendance = _norm("parliamentary_attendance", metrics.get("parliamentary_attendance", 0))
@@ -138,7 +192,7 @@ def score_metrics(metrics: Dict[str, Any]) -> Dict[str, Any]:
     )
 
     # ------------------------------
-    # 3. Influence & Assertiveness
+    # 3. Assertiveness & Influence
     # ------------------------------
     s_party = _norm("party_control_index", metrics.get("party_control_index", 0))
     s_media = _norm("media_mentions_monthly", metrics.get("media_mentions_monthly", 0))
@@ -151,7 +205,7 @@ def score_metrics(metrics: Dict[str, Any]) -> Dict[str, Any]:
     )
 
     # ------------------------------
-    # 4. Professionalism
+    # 4. Policy Engagement & Expertise
     # ------------------------------
     s_leg = _norm("legislative_initiatives", metrics.get("legislative_initiatives", 0))
     s_ind = _norm("independence_index", metrics.get("independence_index", 0))
@@ -162,34 +216,33 @@ def score_metrics(metrics: Dict[str, Any]) -> Dict[str, Any]:
     )
 
     # ------------------------------
-    # 5. Representation (derived)
+    # 5. Representation & Responsiveness (derived)
     # ------------------------------
     representation_score = _clamp((influence_score + professionalism_score) / 2.0, 0.0, 100.0)
 
     # ------------------------------
-    # 6. Cohesion (derived)
+    # 6. Organizational & Party Cohesion (derived)
     # ------------------------------
     cohesion_raw = _as_number(metrics.get("party_control_index", 5), default=5.0) * 10.0
     cohesion_score = _clamp(cohesion_raw, 0.0, 100.0)
 
     # ------------------------------
-    # 7. Narrative / Communication (derived)
+    # 7. Narrative & Communication (derived)
     # ------------------------------
     narrative_score = _norm("media_mentions_monthly", metrics.get("media_mentions_monthly", 0))
 
     # ------------------------------
-    # 8. Momentum & Resilience (new)
+    # Momentum (computed, not part of the 7-dimension contract)
     # ------------------------------
     pos = _as_number(metrics.get("media_positive_events", 0), default=0.0)
     neg = _as_number(metrics.get("media_negative_events", 0), default=0.0)
-
     momentum_raw = pos - neg
-    s_momentum = _norm("momentum_raw", momentum_raw)
+    momentum_score = int(_clamp(_norm("momentum_raw", momentum_raw), 0.0, 100.0))
 
     # ------------------------------
-    # Pack dimensions
+    # Pack dimensions (unordered initially)
     # ------------------------------
-    dimensions = [
+    dimensions_unordered = [
         {"dimension": "Accountability & Transparency", "score": int(_clamp(integrity_score, 0, 100))},
         {"dimension": "Governance & Institutional Strength", "score": int(_clamp(governance_score, 0, 100))},
         {"dimension": "Assertiveness & Influence", "score": int(_clamp(influence_score, 0, 100))},
@@ -197,15 +250,22 @@ def score_metrics(metrics: Dict[str, Any]) -> Dict[str, Any]:
         {"dimension": "Representation & Responsiveness", "score": int(_clamp(representation_score, 0, 100))},
         {"dimension": "Organizational & Party Cohesion", "score": int(_clamp(cohesion_score, 0, 100))},
         {"dimension": "Narrative & Communication", "score": int(_clamp(narrative_score, 0, 100))},
-        {"dimension": "Momentum & Resilience", "score": int(_clamp(s_momentum, 0, 100))},
     ]
 
+    # Enforce official ordering + completeness
+    dimensions = _order_dimensions(dimensions_unordered)
+
     # ------------------------------
-    # Final overall score
+    # Final overall score (7-dim average)
     # ------------------------------
     overall = int(sum(d["score"] for d in dimensions) / len(dimensions)) if dimensions else 0
 
     return {
         "overall_score": overall,
         "dimensions": dimensions,
+        # optional: future-facing signal (won’t break existing consumers)
+        "momentum": {
+            "raw": float(momentum_raw),
+            "score": int(momentum_score),
+        },
     }

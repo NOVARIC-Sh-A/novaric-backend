@@ -130,7 +130,7 @@ class PoliticianCardResponse(BaseModel):
         GET /api/politicians/cards
     """
 
-    id: int
+    id: str
     name: str
     imageUrl: Optional[str] = None
     category: str

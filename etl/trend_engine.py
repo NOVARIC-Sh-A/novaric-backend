@@ -17,6 +17,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional, List
 
+from utils.paragon_constants import PARAGON_DIMENSIONS
 from utils.supabase_client import supabase_upsert, supabase_insert
 
 
@@ -29,19 +30,51 @@ def _now_iso() -> str:
 
 
 def _safe_dimensions(dimensions: Any) -> List[Dict[str, Any]]:
+    """
+    Ensures dimensions_json is always:
+    - exactly the 7 official PARAGON dimensions
+    - ordered exactly as PARAGON_DIMENSIONS
+    - clamped score range 0..100
+    - missing dimensions filled with neutral score=50
+    - unknown/legacy dimensions ignored
+    """
     if not isinstance(dimensions, list):
-        return []
+        dimensions = []
 
-    clean: List[Dict[str, Any]] = []
+    by_name: Dict[str, Dict[str, Any]] = {}
+
+    # Deduplicate (last wins) and keep only official contract dims
     for d in dimensions:
-        if isinstance(d, dict):
-            clean.append(
-                {
-                    "dimension": d.get("dimension"),
-                    "score": int(d.get("score", 0) or 0),
-                }
-            )
-    return clean
+        if not isinstance(d, dict):
+            continue
+
+        name = d.get("dimension")
+        if not isinstance(name, str) or not name:
+            continue
+
+        if name not in PARAGON_DIMENSIONS:
+            continue
+
+        try:
+            score = int(d.get("score", 0) or 0)
+        except Exception:
+            score = 0
+
+        score = max(0, min(100, score))
+
+        by_name[name] = {
+            "dimension": name,
+            "score": score,
+        }
+
+    ordered: List[Dict[str, Any]] = []
+    for name in PARAGON_DIMENSIONS:
+        if name in by_name:
+            ordered.append(by_name[name])
+        else:
+            ordered.append({"dimension": name, "score": 50})
+
+    return ordered
 
 
 # =====================================================================

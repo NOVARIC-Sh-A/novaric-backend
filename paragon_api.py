@@ -17,6 +17,7 @@ from datetime import datetime
 from fastapi import APIRouter, HTTPException
 
 from utils.supabase_client import _get
+from utils.paragon_constants import PARAGON_DIMENSIONS
 from etl.metric_loader import load_metrics_for
 from etl.scoring_engine import score_metrics
 from etl.trend_engine import record_paragon_snapshot
@@ -72,19 +73,81 @@ def _extract_score(row: Dict[str, Any]) -> int:
     return 0
 
 
-def _normalize_row(row: Dict[str, Any]) -> Dict[str, Any]:
+def _order_7_dimensions(dims: Any) -> List[Dict[str, Any]]:
     """
-    Normalizes Supabase row into frontend-safe format.
+    Guarantees the official 7 PARAGON dimensions, ordered exactly as PARAGON_DIMENSIONS.
+
+    Behavior:
+    - Accepts any input (list/None/invalid)
+    - Deduplicates by dimension name (last one wins)
+    - Fills missing official dimensions with neutral score=50
+    - Ignores unknown dimensions (e.g. legacy "Momentum & Resilience")
+    - Clamps scores to 0..100 for UI stability
     """
-    dims = row.get("dimensions_json") or []
     if not isinstance(dims, list):
         dims = []
 
+    by_name: Dict[str, Dict[str, Any]] = {}
+    for d in dims:
+        if not isinstance(d, dict):
+            continue
+
+        name = d.get("dimension")
+        if not isinstance(name, str) or not name:
+            continue
+
+        # Keep contract stable: only allow official 7 dimensions
+        if name not in PARAGON_DIMENSIONS:
+            continue
+
+        try:
+            score = int(d.get("score", 0) or 0)
+        except Exception:
+            score = 0
+
+        score = max(0, min(100, score))
+
+        by_name[name] = {
+            "dimension": name,
+            "score": score,
+        }
+
+    ordered: List[Dict[str, Any]] = []
+    for name in PARAGON_DIMENSIONS:
+        if name in by_name:
+            ordered.append(by_name[name])
+        else:
+            ordered.append({"dimension": name, "score": 50})
+
+    return ordered
+
+
+def _normalize_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Normalizes Supabase row into frontend-safe format.
+
+    Guarantees:
+    - overall_score is present (schema-resilient)
+    - dimensions/dimensions_json are always 7 official PARAGON dimensions in stable order
+    - if overall_score is missing/0 but dimensions exist, it derives a stable overall score
+    """
+    dims = row.get("dimensions_json") or []
+    ordered_dims = _order_7_dimensions(dims)
+
+    overall = _extract_score(row)
+
+    # If score column is missing/legacy, derive from ordered dims (safe for trends rows too)
+    if (overall is None) or (overall == 0 and ordered_dims):
+        try:
+            overall = int(sum(int(d.get("score", 0) or 0) for d in ordered_dims) / len(ordered_dims))
+        except Exception:
+            overall = 0
+
     return {
         **row,
-        "overall_score": _extract_score(row),
-        "dimensions": dims,
-        "dimensions_json": dims,
+        "overall_score": int(overall or 0),
+        "dimensions": ordered_dims,
+        "dimensions_json": ordered_dims,
     }
 
 

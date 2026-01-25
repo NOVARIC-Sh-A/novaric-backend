@@ -68,7 +68,12 @@ def _looks_like_placeholder(url: str) -> bool:
     u = (url or "").strip().lower()
     return (
         not u
-        or u in {"your_supabase_url", "supabase_url", "http://your_supabase_url", "https://your_supabase_url"}
+        or u in {
+            "your_supabase_url",
+            "supabase_url",
+            "http://your_supabase_url",
+            "https://your_supabase_url",
+        }
         or "your_supabase_url" in u
     )
 
@@ -81,7 +86,7 @@ def _has_scheme(url: str) -> bool:
 def _validate_supabase_url(url: str) -> str:
     """
     Keeps behavior Cloud Run–safe (no import-time crash),
-    but prevents invalid requests URLs like "YOUR_SUPABASE_URL/rest/v1/...".
+    but prevents invalid request URLs like "YOUR_SUPABASE_URL/rest/v1/...".
     """
     u = (url or "").strip()
     if not u:
@@ -110,13 +115,13 @@ try:
 except Exception:
     supabase = None  # type: ignore
 
+
 # ----------------------------------------------------
 # Requests session (REST helpers)
 # ----------------------------------------------------
 _session = requests.Session()
 
 # Optional: slightly more resilient networking without changing call-sites.
-# (No extra dependency; uses requests only.)
 try:
     from requests.adapters import HTTPAdapter
     from urllib3.util.retry import Retry
@@ -139,8 +144,9 @@ except Exception:
 
 
 def is_supabase_configured() -> bool:
-    # IMPORTANT:
-    # Must be true only when URL is valid and key is present.
+    """
+    True only when URL is valid and at least one key is present.
+    """
     return bool(SUPABASE_URL and SUPABASE_KEY)
 
 
@@ -152,7 +158,8 @@ def _ensure_config() -> None:
         )
     if not SUPABASE_KEY:
         raise RuntimeError(
-            "No Supabase API key found. Set SUPABASE_SERVICE_ROLE_KEY (recommended) or SUPABASE_ANON_KEY."
+            "No Supabase API key found. Set SUPABASE_SERVICE_ROLE_KEY (recommended) "
+            "or SUPABASE_ANON_KEY."
         )
 
 
@@ -164,9 +171,19 @@ def _rest_url() -> str:
 
 def _headers(*, prefer: Optional[str] = None) -> Dict[str, str]:
     _ensure_config()
-    h = {
-        "apikey": SUPABASE_KEY,
-        "Authorization": f"Bearer {SUPABASE_KEY}",
+
+    # Supabase now supports both:
+    # - Legacy JWT keys: "eyJhbGciOi..."
+    # - New API keys: "sb_publishable_..." / "sb_secret_..."
+    #
+    # PostgREST expects apikey and Authorization Bearer.
+    # For sb_* keys, Bearer still works in current Supabase,
+    # but we keep this logic centralized in case of future change.
+    key = SUPABASE_KEY
+
+    h: Dict[str, str] = {
+        "apikey": key,
+        "Authorization": f"Bearer {key}",
         "Content-Type": "application/json",
     }
     if prefer:
@@ -179,7 +196,7 @@ def _headers(*, prefer: Optional[str] = None) -> Dict[str, str]:
 # ----------------------------------------------------
 def _try_parse_error(resp: requests.Response) -> Tuple[Optional[str], str]:
     """
-    Returns (error_code, raw_text)
+    Returns (error_code, raw_text).
     """
     try:
         j = resp.json()
@@ -201,6 +218,17 @@ def _try_json(resp: requests.Response) -> Any:
 
 
 # ----------------------------------------------------
+# INTERNAL: normalize Supabase REST JSON response to List[Dict]
+# ----------------------------------------------------
+def _normalize_list(data: Any) -> List[Dict[str, Any]]:
+    if isinstance(data, list):
+        return [d for d in data if isinstance(d, dict)]
+    if isinstance(data, dict):
+        return [data]
+    return []
+
+
+# ----------------------------------------------------
 # INTERNAL GET helper
 # ----------------------------------------------------
 def _get(path: str, params: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -213,12 +241,7 @@ def _get(path: str, params: Dict[str, Any]) -> List[Dict[str, Any]]:
     if resp.status_code >= 400:
         raise RuntimeError(f"Supabase GET error {resp.status_code}: {resp.text}")
 
-    data = _try_json(resp)
-    if isinstance(data, list):
-        return data
-    if isinstance(data, dict):
-        return [data]
-    return []
+    return _normalize_list(_try_json(resp))
 
 
 # ----------------------------------------------------
@@ -240,12 +263,7 @@ def _patch(table: str, where_params: Dict[str, str], payload: Dict[str, Any]) ->
     if resp.status_code >= 400:
         raise RuntimeError(f"Supabase PATCH failed [{resp.status_code}]: {resp.text}")
 
-    data = _try_json(resp)
-    if isinstance(data, list):
-        return data
-    if isinstance(data, dict):
-        return [data]
-    return []
+    return _normalize_list(_try_json(resp))
 
 
 # ----------------------------------------------------
@@ -317,7 +335,6 @@ def supabase_upsert(
 
     # 42P10 = "there is no unique or exclusion constraint matching the ON CONFLICT specification"
     if resp.status_code == 400 and err_code == "42P10":
-        # Manual upsert: PATCH then INSERT
         out: List[Any] = []
         for rec in records:
             if conflict_col not in rec:
@@ -330,7 +347,6 @@ def supabase_upsert(
 
             # 1) try UPDATE
             updated = _patch(table, where, rec)
-
             if updated:
                 out.extend(updated)
                 continue
@@ -362,5 +378,4 @@ def fetch_live_paragon_data() -> List[Dict[str, Any]]:
 # Generic table fetcher
 # ----------------------------------------------------
 def fetch_table(table: str, select: str = "*") -> List[Dict[str, Any]]:
-    params = {"select": select}
-    return _get(table, params)
+    return _get(table, {"select": select})

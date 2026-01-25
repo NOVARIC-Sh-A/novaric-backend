@@ -32,6 +32,11 @@ ENV PYTHONPATH="/home/appuser/.local/lib/python3.11/site-packages:/app"
 
 # Create non-root user (Cloud Run best practice)
 RUN useradd -m appuser
+
+# Prepare app directory and ensure expected static dir exists
+# (prevents StaticFiles(directory="static") from crashing if static isn't present)
+RUN mkdir -p /app/static && chown -R appuser:appuser /app
+
 USER appuser
 
 WORKDIR /app

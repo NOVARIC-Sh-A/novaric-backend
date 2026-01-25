@@ -50,6 +50,7 @@ def _rollups_from_dimensions(dim_map: Dict[str, int]) -> Dict[str, int]:
       public_impact -> average(Governance & Institutional Strength, Representation & Responsiveness)
       leadership -> average(Assertiveness & Influence, Policy Engagement & Expertise, Narrative & Communication)
     """
+
     def g(k: str) -> int:
         return int(dim_map.get(k, 0) or 0)
 
@@ -87,6 +88,14 @@ def _fetch_paragon_metrics_rows(limit: int, offset: int) -> List[Dict[str, Any]]
 
 # ---------------------------------------------------------------------
 # Build paragon_scores upsert row
+# NOTE: Must match actual DB schema (authoritative via information_schema):
+#   - dimension_scores (jsonb)
+#   - dimensions_json (jsonb)
+#   - signals_raw (jsonb)
+#   - overall_score (int)
+#   - calculated_at (timestamptz)
+#   - last_updated (timestamptz)
+#   - leadership/integrity/public_impact (int)
 # ---------------------------------------------------------------------
 def _build_paragon_scores_row(metrics_row: Dict[str, Any]) -> Dict[str, Any]:
     politician_id = metrics_row.get("politician_id")
@@ -105,16 +114,21 @@ def _build_paragon_scores_row(metrics_row: Dict[str, Any]) -> Dict[str, Any]:
     # Legacy rollups
     rollups = _rollups_from_dimensions(dim_map)
 
-    # Prepare DB row for paragon_scores
+    now_iso = _now_iso()
+
+    # Prepare DB row for paragon_scores (schema-aligned)
     row: Dict[str, Any] = {
         "politician_id": int(politician_id),
         "overall_score": max(0, min(100, overall)),
-        "dimensions_js": dimensions,        # jsonb list
-        "dimension_sc": dim_map,            # jsonb map for quick access
-        "signals_raw": canonical,           # jsonb canonical signals used in scoring
-        "calculated_at": _now_iso(),        # timestamp
-        # last_updated has default now() in DB, but setting it is harmless.
-        "last_updated": _now_iso(),
+        # Store dimensions in both jsonb columns to keep backward compatibility
+        "dimension_scores": dimensions,  # jsonb list (authoritative contract)
+        "dimensions_json": dimensions,   # jsonb list (legacy/alternate consumer)
+        # Raw canonical signals used for scoring
+        "signals_raw": canonical,        # jsonb
+        # timestamps
+        "calculated_at": now_iso,
+        "last_updated": now_iso,
+        # Keep legacy rollups populated
         **rollups,
     }
 
@@ -155,8 +169,7 @@ def run(*, single_id: Optional[int], limit: int, offset: int, batch_size: int) -
         if len(buffer) >= batch_size:
             # IMPORTANT:
             # paragon_scores PK is id, but we want upsert-by politician_id.
-            # This requires a UNIQUE constraint on paragon_scores.politician_id.
-            # If it doesn't exist, supabase_upsert fallback will PATCH/INSERT.
+            # For best behavior, enforce UNIQUE(politician_id) in Postgres.
             supabase_upsert("paragon_scores", buffer, conflict_col="politician_id")
             print(f"[run_paragon_scoring] Upserted batch: {len(buffer)}")
             buffer.clear()

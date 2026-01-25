@@ -5,7 +5,6 @@ from __future__ import annotations
 # ================================================================
 # RSS FEED ADAPTER (MUST BE FIRST IMPORT)
 # ================================================================
-import rss_feeds_adapter  # noqa: F401  # activates weighted feeds globally
 
 import os
 import sys

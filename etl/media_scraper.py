@@ -1,5 +1,7 @@
 # etl/media_scraper.py
 
+from __future__ import annotations
+
 import os
 import json
 from typing import Dict, Any, List, Optional
@@ -125,7 +127,11 @@ def _detect_profile_context(entity_id: int) -> Dict[str, Optional[str]]:
 # =====================================================================
 # 2. RSS COLLECTION
 # =====================================================================
-def _rss_articles_for_name(name: str, feeds: List[str], max_per_feed: int = 25) -> List[Dict[str, Any]]:
+def _rss_articles_for_name(
+    name: str,
+    feeds: List[str],
+    max_per_feed: int = 25,
+) -> List[Dict[str, Any]]:
     """
     Scans RSS feeds and extracts items mentioning the target name.
     """
@@ -174,7 +180,6 @@ def _rss_articles_for_name(name: str, feeds: List[str], max_per_feed: int = 25) 
 # 3. SERPAPI ENRICHMENT
 # =====================================================================
 def _serpapi_headlines(name: str, country: Optional[str]) -> List[str]:
-
     # TEST MODE disables SerpAPI
     if TEST_MODE:
         return []
@@ -185,15 +190,13 @@ def _serpapi_headlines(name: str, country: Optional[str]) -> List[str]:
     query = " ".join([name, "profil", "biografi", "media", "politikan", country or ""])
 
     try:
-        search = GoogleSearch(
-            {"q": query, "api_key": SERPAPI_KEY, "num": 10, "hl": "sq"}
-        )
+        search = GoogleSearch({"q": query, "api_key": SERPAPI_KEY, "num": 10, "hl": "sq"})
         res = search.get_dict()
     except Exception as e:
         print(f"[media_scraper] SerpAPI error: {e}")
         return []
 
-    texts = []
+    texts: List[str] = []
     for item in res.get("organic_results", []):
         if item.get("title"):
             texts.append(item["title"])
@@ -206,13 +209,30 @@ def _serpapi_headlines(name: str, country: Optional[str]) -> List[str]:
 # =====================================================================
 # 4. GEMINI ANALYSIS
 # =====================================================================
+def _safe_float(v: Any, default: float = 0.0) -> float:
+    try:
+        if v is None:
+            return float(default)
+        return float(v)
+    except Exception:
+        return float(default)
+
+
+def _safe_int(v: Any, default: int = 0) -> int:
+    try:
+        if v is None:
+            return int(default)
+        return int(float(v))
+    except Exception:
+        return int(default)
+
+
 def _gemini_media_analysis(
     name: str,
     profile_type: str,
     rss_articles: List[Dict[str, Any]],
     serpapi_texts: List[str],
 ) -> Dict[str, Any]:
-
     mentions_estimate = len(rss_articles) + len(serpapi_texts)
 
     # TEST MODE disables Gemini
@@ -237,7 +257,7 @@ def _gemini_media_analysis(
     genai.configure(api_key=GOOGLE_API_KEY)
     model = genai.GenerativeModel("gemini-2.5-flash")
 
-    rss_text = "\n".join(f"- {a['title']} :: {a['summary']}" for a in rss_articles[:40])
+    rss_text = "\n".join(f"- {a.get('title','')} :: {a.get('summary','')}" for a in rss_articles[:40])
     serp_text = "\n".join(f"- {t}" for t in serpapi_texts[:40])
 
     prompt = f"""
@@ -261,20 +281,25 @@ SERPAPI:
 
     try:
         response = model.generate_content(prompt, generation_config={"temperature": 0.25})
-        text = response.text.strip()
+        text = (response.text or "").strip()
 
+        # tolerate fenced code blocks
         if text.startswith("```"):
-            text = text.strip("`")
-            if text.startswith("json"):
+            text = text.strip("`").strip()
+            if text.lower().startswith("json"):
                 text = text[4:].strip()
 
-        data = json.loads(text)
+        data = json.loads(text) if text else {}
+
+        if not isinstance(data, dict):
+            data = {}
+
         return {
-            "sentiment_score": float(data.get("sentiment_score", 0.0)),
-            "scandals_flagged": int(data.get("scandals_flagged", 0)),
-            "mentions": int(data.get("mentions", mentions_estimate)),
-            "positive_events": int(data.get("positive_events", 0)),
-            "negative_events": int(data.get("negative_events", 0)),
+            "sentiment_score": _safe_float(data.get("sentiment_score"), 0.0),
+            "scandals_flagged": _safe_int(data.get("scandals_flagged"), 0),
+            "mentions": _safe_int(data.get("mentions"), mentions_estimate),
+            "positive_events": _safe_int(data.get("positive_events"), 0),
+            "negative_events": _safe_int(data.get("negative_events"), 0),
         }
 
     except Exception as e:
@@ -321,13 +346,13 @@ def scrape_media_signals(entity_id: int) -> Dict[str, Any]:
     serpapi_texts = _serpapi_headlines(name, country)
     analysis = _gemini_media_analysis(name, profile_type, rss_articles, serpapi_texts)
 
-    attendance_signal = analysis["positive_events"] - analysis["negative_events"]
+    attendance_signal = int(analysis.get("positive_events", 0) or 0) - int(analysis.get("negative_events", 0) or 0)
 
     return {
-        "mentions": analysis["mentions"],
-        "scandals_flagged": analysis["scandals_flagged"],
-        "sentiment_score": analysis["sentiment_score"],
+        "mentions": int(analysis.get("mentions", 0) or 0),
+        "scandals_flagged": int(analysis.get("scandals_flagged", 0) or 0),
+        "sentiment_score": float(analysis.get("sentiment_score", 0.0) or 0.0),
         "attendance_signal": attendance_signal,
-        "positive_events": analysis["positive_events"],
-        "negative_events": analysis["negative_events"],
+        "positive_events": int(analysis.get("positive_events", 0) or 0),
+        "negative_events": int(analysis.get("negative_events", 0) or 0),
     }

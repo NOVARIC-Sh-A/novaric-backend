@@ -1,9 +1,11 @@
+# main.py
+
 from __future__ import annotations
 
 # ================================================================
 # RSS FEED ADAPTER (MUST BE FIRST IMPORT)
 # ================================================================
-import rss_feeds_adapter  # activates weighted feeds globally
+import rss_feeds_adapter  # noqa: F401  # activates weighted feeds globally
 
 import os
 import sys
@@ -26,8 +28,6 @@ from pydantic import BaseModel
 # ================================================================
 # STDOUT/STDERR FLUSH (CLOUD RUN FRIENDLY)
 # ================================================================
-# Cloud Run captures stdout/stderr. If buffering occurs (e.g., gunicorn workers),
-# prints/logs may not appear. These settings improve log visibility.
 try:
     os.environ.setdefault("PYTHONUNBUFFERED", "1")
     if hasattr(sys.stdout, "reconfigure"):
@@ -40,7 +40,6 @@ except Exception:
 # ================================================================
 # LOGGING (BOOT FIRST)
 # ================================================================
-# Ensure logs go to stdout (Cloud Run). Avoid duplicate handlers.
 _root = logging.getLogger()
 if not _root.handlers:
     logging.basicConfig(
@@ -81,7 +80,6 @@ try:
 except Exception as e:
     logger.exception("Failed to load enrichment router (startup continues): %s", e)
 
-# 🔑 OPTION A: politicians cards API
 try:
     from routers.politicians import router as politicians_router  # type: ignore  # noqa: E402
 
@@ -132,14 +130,11 @@ app = FastAPI(
 # ================================================================
 # GLOBAL EXCEPTION LOGGING (DOES NOT CHANGE RESPONSE CONTRACTS)
 # ================================================================
-# This ensures unexpected exceptions are visible in Cloud Run logs,
-# even when upstream code catches and returns generic 500 messages.
 @app.middleware("http")
 async def _log_unhandled_exceptions(request: Request, call_next):
     try:
         return await call_next(request)
     except Exception as e:
-        # Log full stack trace server-side; keep client response generic.
         logger.exception("Unhandled exception: %s %s | %s", request.method, request.url.path, e)
         return JSONResponse(status_code=500, content={"detail": "Internal Server Error"})
 
@@ -160,17 +155,29 @@ def list_routes():
 
 
 # ================================================================
-# STATIC FILES
+# STATIC FILES (SAFE)
 # ================================================================
-app.mount("/static", StaticFiles(directory="static"), name="static")
+# Avoid startup crash if the static directory is missing in some deployments.
+try:
+    if os.path.isdir("static"):
+        app.mount("/static", StaticFiles(directory="static"), name="static")
+    else:
+        logger.warning("Static directory 'static/' not found; /static will not be mounted.")
+except Exception as e:
+    logger.warning("Static mount failed (startup continues): %s", e)
+
 
 # ================================================================
-# FAVICON
+# FAVICON (SAFE)
 # ================================================================
 @app.get("/favicon.ico", include_in_schema=False)
 def favicon():
-    with open("static/favicon.ico", "rb") as f:
-        return Response(f.read(), media_type="image/x-icon")
+    try:
+        path = os.path.join("static", "favicon.ico")
+        with open(path, "rb") as f:
+            return Response(f.read(), media_type="image/x-icon")
+    except Exception:
+        return Response(status_code=404)
 
 
 # ================================================================
@@ -231,8 +238,9 @@ def infer_source_type(feed_url: str) -> SourceType:
 
 
 def infer_source_name(parsed_feed: object, feed_url: str) -> str:
-    title = getattr(parsed_feed.feed, "title", None)
-    return title.strip() if title else urlparse(feed_url).netloc.replace("www.", "")
+    title = getattr(parsed_feed, "feed", None)
+    feed_title = getattr(title, "title", None) if title else None
+    return feed_title.strip() if feed_title else urlparse(feed_url).netloc.replace("www.", "")
 
 
 def extract_image(entry: object) -> str:
@@ -280,7 +288,7 @@ def health_probe():
 @app.get("/api/v1/news", response_model=List[NewsArticle])
 async def get_news(category: str = Query(default="all")):
     # ------------------------------------------------------------
-    # 0) TTL cache (avoids repeated feed parsing + scoring)
+    # 0) TTL cache
     # ------------------------------------------------------------
     now = time.time()
     cached = _NEWS_CACHE.get(category)
@@ -293,12 +301,11 @@ async def get_news(category: str = Query(default="all")):
 
     feeds = get_feeds_for_news_category(category)
 
-    # CSC needs peers; pulling only 1 entry per feed often yields no corroboration.
     per_feed = int(os.getenv("NEWS_ENTRIES_PER_FEED", "4"))
     per_feed = max(1, min(10, per_feed))
 
     # ------------------------------------------------------------
-    # 1) Parse feeds concurrently (single pass)
+    # 1) Parse feeds concurrently
     # ------------------------------------------------------------
     def _fetch_feed(feed_url: str) -> List[dict]:
         try:
@@ -342,8 +349,7 @@ async def get_news(category: str = Query(default="all")):
         return []
 
     # ------------------------------------------------------------
-    # 2) Compute peer_titles using the same logic as services/ner_engine.py
-    #    (fingerprint + Jaccard >= 0.35, cross-source only)
+    # 2) Peer titles (fingerprint + Jaccard >= 0.35, cross-source only)
     # ------------------------------------------------------------
     def _fingerprint_title(title: str) -> set[str]:
         t = (title or "").lower()
@@ -387,13 +393,12 @@ async def get_news(category: str = Query(default="all")):
             if i == j:
                 continue
             if it.get("sourceName") == other.get("sourceName"):
-                continue  # cross-source corroboration
+                continue
             if _jacc(fi, fps[j]) >= 0.35:
                 t = (other.get("title") or "").strip()
                 if t:
                     peers.append(t)
 
-        # dedupe, keep order
         seen = set()
         deduped: List[str] = []
         for t in peers:
@@ -404,8 +409,7 @@ async def get_news(category: str = Query(default="all")):
         peer_titles_by_idx[i] = deduped
 
     # ------------------------------------------------------------
-    # 3) Batch-fetch snapshots in one DB call where possible
-    #    (avoids per-article DB calls when Supabase is configured)
+    # 3) Batch-fetch snapshots (optional)
     # ------------------------------------------------------------
     snapshots_by_article_id: Dict[str, dict] = {}
 
@@ -424,7 +428,6 @@ async def get_news(category: str = Query(default="all")):
             if aid:
                 article_ids.append(aid)
 
-        # Deduplicate ids, preserve order
         article_ids = list(dict.fromkeys(article_ids))
 
         try:
@@ -441,9 +444,7 @@ async def get_news(category: str = Query(default="all")):
                     if aid:
                         snapshots_by_article_id[aid] = row
         except Exception as e:
-            logger.warning(
-                "Batch snapshot fetch failed (will use per-article snapshot/compute): %s", e
-            )
+            logger.warning("Batch snapshot fetch failed (fallbacks will apply): %s", e)
             snapshots_by_article_id = {}
 
     # ------------------------------------------------------------
@@ -461,10 +462,6 @@ async def get_news(category: str = Query(default="all")):
         peers = peer_titles_by_idx[idx]
 
         article_id = (it.get("id") or it.get("originalArticleUrl") or "").strip()
-
-        # IMPORTANT STABILITY FIX:
-        # Some feeds provide neither id nor link, or provide unstable ids.
-        # This ensures a deterministic non-empty key for caching/snapshots.
         if not article_id:
             article_id = f"{feed_url}::{title}".strip()
 
@@ -517,8 +514,8 @@ async def get_news(category: str = Query(default="all")):
                 articles.append(a)
                 continue
 
-            # 2) Repository snapshot (single read)
-            snap = get_snapshot(article_id)
+            # 2) Repository snapshot
+            snap = get_snapshot(article_id)  # type: ignore[misc]
             if snap:
                 a.ecosystemRating = int(snap.ecosystemRating)
                 a.nerVersion = str(getattr(snap, "nerVersion", None) or "ner_v1.0")
@@ -534,8 +531,8 @@ async def get_news(category: str = Query(default="all")):
                 articles.append(a)
                 continue
 
-            # 3) Compute fresh NER (CSC uses peer_titles computed above)
-            ner_res = compute_ner(
+            # 3) Compute fresh NER
+            ner_res = compute_ner(  # type: ignore[misc]
                 feed_url=feed_url,
                 source_type=source_type,
                 title=title,
@@ -556,8 +553,8 @@ async def get_news(category: str = Query(default="all")):
                 "corroborators": len(peers),
             }
 
-            # Persist snapshot (idempotent by article_id)
-            save_snapshot(
+            # Persist snapshot
+            save_snapshot(  # type: ignore[misc]
                 article_id=article_id,
                 feed_url=feed_url,
                 published_ts=published,
@@ -597,7 +594,6 @@ if politicians_router:
 # ================================================================
 @app.on_event("startup")
 def startup_event():
-    # Add a quick env sanity log (non-secret booleans only)
     logger.info("NOVARIC Backend started successfully.")
     try:
         supabase_url_set = bool(os.getenv("SUPABASE_URL"))
@@ -619,8 +615,6 @@ def shutdown_event():
 # ================================================================
 # ENTRYPOINT (CLOUD RUN COMPATIBLE)
 # ================================================================
-# Cloud Run requires the container to listen on 0.0.0.0:$PORT (PORT is injected).
-# This keeps local dev simple while remaining Cloud Run compliant.
 if __name__ == "__main__":
     try:
         import uvicorn  # type: ignore
@@ -628,7 +622,6 @@ if __name__ == "__main__":
         port = int(os.getenv("PORT", "8080"))
         logger.info("Starting uvicorn | host=0.0.0.0 | port=%s", port)
 
-        # If your filename is not main.py, change "main:app" accordingly.
         uvicorn.run(
             "main:app",
             host="0.0.0.0",

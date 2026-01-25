@@ -12,9 +12,9 @@ ETL pipeline:
 from __future__ import annotations
 
 from typing import Any, Dict, List
-from datetime import datetime
+from datetime import datetime, timezone
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 
 from utils.supabase_client import _get
 from utils.paragon_constants import PARAGON_DIMENSIONS
@@ -131,7 +131,7 @@ def _normalize_row(row: Dict[str, Any]) -> Dict[str, Any]:
     - dimensions/dimensions_json are always 7 official PARAGON dimensions in stable order
     - if overall_score is missing/0 but dimensions exist, it derives a stable overall score
     """
-    dims = row.get("dimensions_json") or []
+    dims = row.get("dimensions_json") or row.get("dimension_scores") or []
     ordered_dims = _order_7_dimensions(dims)
 
     overall = _extract_score(row)
@@ -139,7 +139,9 @@ def _normalize_row(row: Dict[str, Any]) -> Dict[str, Any]:
     # If score column is missing/legacy, derive from ordered dims (safe for trends rows too)
     if (overall is None) or (overall == 0 and ordered_dims):
         try:
-            overall = int(sum(int(d.get("score", 0) or 0) for d in ordered_dims) / len(ordered_dims))
+            overall = int(
+                sum(int(d.get("score", 0) or 0) for d in ordered_dims) / len(ordered_dims)
+            )
         except Exception:
             overall = 0
 
@@ -363,12 +365,58 @@ def get_paragon_dashboard(limit: int = 10, scan_limit: int = 500):
 # 5. RECOMPUTATION (SAFE MODE ONLY)
 # =====================================================================
 
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
 @router.post("/recompute/{politician_id}")
-def recompute_paragon_score(politician_id: int):
+def recompute_paragon_score(politician_id: int, request: Request):
+    """
+    Recomputes the PARAGON score for a single politician.
+
+    Strategy:
+    - Preferred: run the metrics+scoring pipeline if available (keeps DB in sync with your new tables).
+    - Fallback: legacy metric_loader + trend snapshot (current behavior).
+    """
+    req_id = request.headers.get("x-request-id") or request.headers.get("x-cloud-trace-context") or ""
+    print(f"[paragon_api] recompute start politician_id={politician_id} req={req_id} ts={_utc_now_iso()}")
+
     try:
-        metrics = load_metrics_for(politician_id, safe_mode=True)
+        # ------------------------------------------------------------
+        # Preferred path: use your working ETL pipeline (if present)
+        # ------------------------------------------------------------
+        try:
+            # Import inside function to avoid import-time failures (Cloud Run safe)
+            from etl.run_paragon_pipeline import run_single_politician  # type: ignore
+
+            run_single_politician(int(politician_id))
+            # After pipeline run, return freshest score from DB (single source of truth)
+            rows = _fetch_safe(
+                "paragon_scores",
+                {"select": "*", "politician_id": f"eq.{int(politician_id)}", "limit": 1},
+            )
+            if rows:
+                row = _normalize_row(rows[0])
+                print(f"[paragon_api] recompute ok (pipeline) politician_id={politician_id} req={req_id}")
+                return {
+                    "politician_id": politician_id,
+                    "overall_score": row.get("overall_score", 0),
+                    "dimensions": row.get("dimensions_json") or row.get("dimensions") or [],
+                    "calculated_at": row.get("calculated_at") or row.get("last_updated") or _utc_now_iso(),
+                    "message": "PARAGON score recomputed successfully",
+                }
+        except Exception as pipeline_err:
+            # Pipeline not installed or failed; continue with legacy safe-mode path
+            print(f"[paragon_api] pipeline recompute unavailable/failed politician_id={politician_id}: {pipeline_err}")
+
+        # ------------------------------------------------------------
+        # Fallback path (legacy): metric_loader + scoring_engine + trend snapshot
+        # ------------------------------------------------------------
+        metrics = load_metrics_for(int(politician_id), safe_mode=True)
         scoring = score_metrics(metrics)
-        snapshot = record_paragon_snapshot(politician_id, scoring)
+        snapshot = record_paragon_snapshot(int(politician_id), scoring)
+
+        print(f"[paragon_api] recompute ok (legacy) politician_id={politician_id} req={req_id}")
 
         return {
             "politician_id": politician_id,
@@ -379,7 +427,8 @@ def recompute_paragon_score(politician_id: int):
         }
 
     except Exception as e:
-        print(f"[paragon_api] recompute failed: {e}")
+        # This is the line you need in Cloud Run to debug real root cause.
+        print(f"[paragon_api] recompute failed politician_id={politician_id} req={req_id}: {e}")
         raise HTTPException(
             status_code=500,
             detail="PARAGON recomputation failed",
@@ -387,7 +436,12 @@ def recompute_paragon_score(politician_id: int):
 
 
 @router.post("/recompute-all")
-def recompute_all(scan_limit: int = 500):
+def recompute_all(scan_limit: int = 500, request: Request | None = None):
+    req_id = ""
+    if request is not None:
+        req_id = request.headers.get("x-request-id") or request.headers.get("x-cloud-trace-context") or ""
+    print(f"[paragon_api] recompute-all start scan_limit={scan_limit} req={req_id} ts={_utc_now_iso()}")
+
     rows = _fetch_safe("politicians", {"select": "id", "limit": scan_limit})
 
     updated = 0
@@ -396,10 +450,22 @@ def recompute_all(scan_limit: int = 500):
     for r in rows:
         try:
             pid = int(r["id"])
+
+            # Preferred pipeline path
+            try:
+                from etl.run_paragon_pipeline import run_single_politician  # type: ignore
+                run_single_politician(pid)
+                updated += 1
+                continue
+            except Exception as pipeline_err:
+                print(f"[paragon_api] recompute-all pipeline failed pid={pid}: {pipeline_err}")
+
+            # Fallback legacy path
             metrics = load_metrics_for(pid, safe_mode=True)
             scoring = score_metrics(metrics)
             record_paragon_snapshot(pid, scoring)
             updated += 1
+
         except Exception as e:
             failed.append(
                 {

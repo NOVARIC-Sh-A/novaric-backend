@@ -1,5 +1,4 @@
 # main.py
-
 from __future__ import annotations
 
 # ================================================================
@@ -67,21 +66,18 @@ politicians_router = None
 
 try:
     from paragon_api import router as paragon_router  # type: ignore  # noqa: E402
-
     logger.info("PARAGON router loaded")
 except Exception as e:
     logger.exception("Failed to load PARAGON router (startup continues): %s", e)
 
 try:
     from routers.profile_enrichment import router as enrichment_router  # type: ignore  # noqa: E402
-
     logger.info("Enrichment router loaded")
 except Exception as e:
     logger.exception("Failed to load enrichment router (startup continues): %s", e)
 
 try:
     from routers.politicians import router as politicians_router  # type: ignore  # noqa: E402
-
     logger.info("Politicians router loaded")
 except Exception as e:
     logger.warning("Politicians router not loaded yet: %s", e)
@@ -101,7 +97,6 @@ from config.rss_feeds import (  # noqa: E402
 try:
     from services.ner_engine import compute_ner  # type: ignore  # noqa: E402
     from services.ner_repository import get_snapshot, save_snapshot  # type: ignore  # noqa: E402
-
     logger.info("NER engine loaded")
 except Exception as e:
     compute_ner = None
@@ -116,12 +111,20 @@ _NEWS_CACHE: Dict[str, Dict[str, object]] = {}
 _NEWS_CACHE_TTL_SECONDS = int(os.getenv("NEWS_CACHE_TTL_SECONDS", "30"))
 
 # ================================================================
+# API PREFIXES (STANDARDIZE + KEEP BACKWARD COMPATIBILITY)
+# ================================================================
+# Authoritative new prefix (recommended for all clients)
+API_V1_PREFIX = os.getenv("API_V1_PREFIX", "/api/v1").rstrip("/") or "/api/v1"
+# Legacy prefix still supported so existing frontends don’t break
+API_LEGACY_PREFIX = os.getenv("API_LEGACY_PREFIX", "/api").rstrip("/") or "/api"
+
+# ================================================================
 # FASTAPI APP
 # ================================================================
 app = FastAPI(
     title="NOVARIC Backend",
     description="Official NOVARIC® Backend Services • News • PARAGON",
-    version="2.3.0",
+    version="2.3.1",
     docs_url=None,
     redoc_url=None,
 )
@@ -137,7 +140,6 @@ async def _log_unhandled_exceptions(request: Request, call_next):
         logger.exception("Unhandled exception: %s %s | %s", request.method, request.url.path, e)
         return JSONResponse(status_code=500, content={"detail": "Internal Server Error"})
 
-
 # ================================================================
 # ROUTE INTROSPECTION (DEBUG)
 # ================================================================
@@ -152,11 +154,9 @@ def list_routes():
         key=lambda x: x["path"],
     )
 
-
 # ================================================================
 # STATIC FILES (SAFE)
 # ================================================================
-# Avoid startup crash if the static directory is missing in some deployments.
 try:
     if os.path.isdir("static"):
         app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -164,7 +164,6 @@ try:
         logger.warning("Static directory 'static/' not found; /static will not be mounted.")
 except Exception as e:
     logger.warning("Static mount failed (startup continues): %s", e)
-
 
 # ================================================================
 # FAVICON (SAFE)
@@ -178,7 +177,6 @@ def favicon():
     except Exception:
         return Response(status_code=404)
 
-
 # ================================================================
 # CUSTOM SWAGGER
 # ================================================================
@@ -190,13 +188,19 @@ def custom_swagger_docs():
         swagger_favicon_url="/static/favicon.ico",
     )
 
-
 # ================================================================
 # CORS
 # ================================================================
+# Use CORS_ORIGINS="https://a.com,https://b.com" in Cloud Run for production tightening.
+cors_env = os.getenv("CORS_ORIGINS", "*").strip()
+if cors_env == "*" or not cors_env:
+    allow_origins = ["*"]
+else:
+    allow_origins = [o.strip() for o in cors_env.split(",") if o.strip()]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # tighten later
+    allow_origins=allow_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -223,7 +227,6 @@ class NewsArticle(BaseModel):
     ecosystemRating: Optional[int] = None
     nerVersion: Optional[str] = None
     nerBreakdown: Optional[Dict[str, object]] = None
-
 
 # ================================================================
 # HELPERS
@@ -256,7 +259,6 @@ def _epoch(ts: str) -> float:
     except Exception:
         return 0.0
 
-
 # ================================================================
 # ROOT / HEALTH
 # ================================================================
@@ -273,6 +275,8 @@ def root():
         "profiles_loaded": profiles_count,
         "paragon": bool(paragon_router),
         "politicians_api": bool(politicians_router),
+        "api_prefix_v1": API_V1_PREFIX,
+        "api_prefix_legacy": API_LEGACY_PREFIX,
     }
 
 
@@ -280,11 +284,10 @@ def root():
 def health_probe():
     return {"status": "healthy"}
 
-
 # ================================================================
-# NEWS API
+# NEWS API (AUTHORITATIVE UNDER /api/v1)
 # ================================================================
-@app.get("/api/v1/news", response_model=List[NewsArticle])
+@app.get(f"{API_V1_PREFIX}/news", response_model=List[NewsArticle])
 async def get_news(category: str = Query(default="all")):
     # ------------------------------------------------------------
     # 0) TTL cache
@@ -354,22 +357,8 @@ async def get_news(category: str = Query(default="all")):
         t = (title or "").lower()
         tokens = re.findall(r"[a-zA-ZÀ-ž0-9']+", t)
         stop = {
-            "the",
-            "and",
-            "or",
-            "of",
-            "to",
-            "in",
-            "a",
-            "an",
-            "for",
-            "on",
-            "with",
-            "nga",
-            "dhe",
-            "ose",
-            "ne",
-            "per",
+            "the", "and", "or", "of", "to", "in", "a", "an", "for", "on", "with",
+            "nga", "dhe", "ose", "ne", "per",
         }
         core = [x for x in tokens if len(x) >= 4 and x not in stop]
         return set(core[:20])
@@ -414,7 +403,6 @@ async def get_news(category: str = Query(default="all")):
 
     try:
         from utils.supabase_client import supabase, is_supabase_configured  # type: ignore
-
         supabase_ok = bool(supabase and is_supabase_configured())
     except Exception:
         supabase_ok = False
@@ -575,18 +563,41 @@ async def get_news(category: str = Query(default="all")):
     _NEWS_CACHE[category] = {"ts": now, "data": result}
     return result
 
+# ================================================================
+# ROUTER MOUNTING (AUTHORITATIVE + LEGACY COMPAT)
+# ================================================================
+# Goal:
+# - Keep existing clients working on /api/...
+# - Introduce clean, consistent /api/v1/... for routers as well.
+# This prevents frontend confusion and eliminates broken links over time.
 
-# ================================================================
-# ROUTER MOUNTING (AUTHORITATIVE)
-# ================================================================
+def _mount_router_twice(router_obj, *, name: str):
+    """
+    Mounts a router under both legacy and v1 prefixes:
+      - /api/...
+      - /api/v1/...
+    Safe to call only when router_obj is not None.
+    """
+    try:
+        app.include_router(router_obj, prefix=API_LEGACY_PREFIX)
+        logger.info("Mounted %s router at %s", name, API_LEGACY_PREFIX)
+    except Exception as e:
+        logger.warning("Failed to mount %s router at %s: %s", name, API_LEGACY_PREFIX, e)
+
+    try:
+        app.include_router(router_obj, prefix=API_V1_PREFIX)
+        logger.info("Mounted %s router at %s", name, API_V1_PREFIX)
+    except Exception as e:
+        logger.warning("Failed to mount %s router at %s: %s", name, API_V1_PREFIX, e)
+
 if paragon_router:
-    app.include_router(paragon_router, prefix="/api")
+    _mount_router_twice(paragon_router, name="PARAGON")
 
 if enrichment_router:
-    app.include_router(enrichment_router, prefix="/api")
+    _mount_router_twice(enrichment_router, name="ENRICHMENT")
 
 if politicians_router:
-    app.include_router(politicians_router, prefix="/api")
+    _mount_router_twice(politicians_router, name="POLITICIANS")
 
 # ================================================================
 # LIFECYCLE
@@ -602,6 +613,7 @@ def startup_event():
             supabase_url_set,
             supabase_service_role_set,
         )
+        logger.info("API prefixes: v1=%s | legacy=%s", API_V1_PREFIX, API_LEGACY_PREFIX)
     except Exception:
         pass
 
@@ -609,7 +621,6 @@ def startup_event():
 @app.on_event("shutdown")
 def shutdown_event():
     logger.info("NOVARIC Backend stopped.")
-
 
 # ================================================================
 # ENTRYPOINT (CLOUD RUN COMPATIBLE)

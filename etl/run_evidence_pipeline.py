@@ -15,9 +15,6 @@ from etl.evidence.politician_matcher import match_politician_id
 from utils.supabase_client import supabase_insert, supabase_upsert
 
 
-# ---------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------
 DEFAULT_SOURCE_KEY = "rss_albanian_media"
 
 
@@ -64,36 +61,46 @@ def ensure_source_registry(source_key: str) -> None:
 # ---------------------------------------------------------------------
 # scrape_runs lifecycle
 # ---------------------------------------------------------------------
-def start_run(source_key: str) -> int:
+def start_run(source_key: str) -> Tuple[int, str, str]:
     """
-    Creates a scrape_runs record (status=running) and returns run_id.
-    Requires source_registry.key to exist (FK).
+    Creates a scrape_runs record (status=running) and returns:
+      (run_id, source_key, started_at_iso)
     """
     ensure_source_registry(source_key)
 
+    started_at = datetime.now(timezone.utc).isoformat()
     row = {
         "source_key": source_key,
         "status": "running",
-        "started_at": datetime.now(timezone.utc).isoformat(),
+        "started_at": started_at,
     }
     res = supabase_insert("scrape_runs", [row])
-    return int(res[0]["id"])
+    run_id = int(res[0]["id"])
+    return run_id, source_key, started_at
 
 
 def end_run(
     run_id: int,
     *,
+    source_key: str,
+    started_at: str,
     status: str,
     items_fetched: int,
     items_extracted: int,
     error: Optional[str] = None,
 ) -> None:
     """
-    Updates scrape_runs with completion metadata.
-    Uses upsert on primary key id (safe if id is PK).
+    Finalizes scrape_runs.
+
+    IMPORTANT:
+    - We use UPSERT on id.
+    - Because source_key is NOT NULL, it MUST be included in the payload even during upsert,
+      otherwise Postgres can fail BEFORE applying ON CONFLICT.
     """
     row: Dict[str, Any] = {
         "id": int(run_id),
+        "source_key": source_key,  # REQUIRED (NOT NULL)
+        "started_at": started_at,  # keep stable (optional but consistent)
         "status": status,
         "ended_at": datetime.now(timezone.utc).isoformat(),
         "items_fetched": int(items_fetched),
@@ -165,14 +172,12 @@ def to_evidence(items: List[Dict[str, Any]], source_key: str) -> List[EvidenceIt
             source_key=source_key,
             url=url,
             title=title,
-            published_at=published_at,     # now parsed to ISO when possible
+            published_at=published_at,
             content_type="article",
             language="sq",
             snippet=summary[:600],
             raw_text=summary[:2000],
-            entities={
-                "feed_url": it.get("feed_url"),
-            },
+            entities={"feed_url": it.get("feed_url")},
             topics=[],
             signals={},
             extraction_confidence=0.6,
@@ -187,7 +192,7 @@ def to_evidence(items: List[Dict[str, Any]], source_key: str) -> List[EvidenceIt
 # Runner
 # ---------------------------------------------------------------------
 def run(*, category: str, per_feed: int, source_key: str = DEFAULT_SOURCE_KEY) -> None:
-    run_id = start_run(source_key)
+    run_id, sk, started_at = start_run(source_key)
 
     fetched = 0
     extracted = 0
@@ -198,19 +203,19 @@ def run(*, category: str, per_feed: int, source_key: str = DEFAULT_SOURCE_KEY) -
         items, errors = rss_pull(category=category, per_feed=per_feed)
         fetched = len(items)
 
-        evidence = to_evidence(items, source_key=source_key)
+        evidence = to_evidence(items, source_key=sk)
         extracted = len(evidence)
 
         written = write_evidence_batch(evidence, run_id=run_id, batch_size=200)
-
         matched = sum(1 for ev in evidence if ev.politician_id is not None)
 
         if errors:
-            # Soft-fail: still mark success but record truncated error context
+            # Soft-fail: record truncated error context but keep status success
             err_msg = " | ".join(errors[:5])
+
         print(
-            f"[run_evidence_pipeline] run_id={run_id} fetched={fetched} "
-            f"extracted={extracted} matched_politicians={matched} evidence_written={written}"
+            f"[run_evidence_pipeline] run_id={run_id} fetched={fetched} extracted={extracted} "
+            f"matched_politicians={matched} evidence_written={written}"
         )
 
     except Exception as e:
@@ -218,17 +223,19 @@ def run(*, category: str, per_feed: int, source_key: str = DEFAULT_SOURCE_KEY) -
         err_msg = str(e)
         print(f"[run_evidence_pipeline] run_id={run_id} FAILED: {e}")
         raise
+
     finally:
         try:
             end_run(
                 run_id,
+                source_key=sk,
+                started_at=started_at,
                 status=status,
                 items_fetched=fetched,
                 items_extracted=extracted,
                 error=err_msg,
             )
         except Exception as e2:
-            # Do not mask the primary exception if one occurred
             print(f"[run_evidence_pipeline] run_id={run_id} WARN: failed to finalize scrape_runs: {e2}")
 
 

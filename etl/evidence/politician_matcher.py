@@ -1,19 +1,22 @@
 # etl/evidence/politician_matcher.py
 from __future__ import annotations
 
+import os
 import re
-from typing import Dict, List, Optional, Set, Tuple
+import time
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Set, Tuple, Any
 
 from etl.politician_map import normalize_name, POLITICIAN_ID_MAP_NORMALIZED
 from utils.supabase_client import _get
 
 
-# ---------------------------------------------------------------------
-# Lightweight tokenization (Albanian-safe)
-# ---------------------------------------------------------------------
+# =============================================================================
+# Config
+# =============================================================================
+
 _TOKEN_RE = re.compile(r"[a-zA-ZÀ-ž0-9çë]+", re.UNICODE)
 
-# Common Albanian/English stopwords to reduce noise in token matching
 _STOPWORDS: Set[str] = {
     "dhe", "ose", "me", "pa", "nga", "te", "tek", "ne", "në", "per", "për",
     "si", "qe", "që", "se", "ka", "kishte", "janë", "është", "u", "do", "më",
@@ -21,31 +24,74 @@ _STOPWORDS: Set[str] = {
     "the", "and", "or", "to", "in", "on", "of", "for", "with",
 }
 
-# Guardrails: only consider tokens with at least this many characters
 _MIN_TOKEN_LEN = 4
 
+_ALIAS_CACHE_TTL_SECONDS = int(os.getenv("ALIAS_CACHE_TTL_SECONDS", "600"))
+_MATCHER_DEBUG = (os.getenv("MATCHER_DEBUG", "").strip().lower() in {"1", "true", "yes", "y"})
 
-# ---------------------------------------------------------------------
-# Cache (per process run) to avoid repeated DB calls
-# ---------------------------------------------------------------------
+
+# =============================================================================
+# Data structures
+# =============================================================================
+
+@dataclass(frozen=True)
+class MatchDebug:
+    politician_id: Optional[int]
+    method: str
+    confidence: float
+    evidence: Dict[str, Any]
+
+
+# =============================================================================
+# Caches (process memory)
+# =============================================================================
+
 _cached_alias_map: Optional[Dict[str, int]] = None
-_cached_lastname_map: Optional[Dict[str, List[int]]] = None
+_cached_alias_loaded_at: float = 0.0
 
+_cached_lastname_map: Optional[Dict[str, List[int]]] = None
+_cached_pid_to_normname: Optional[Dict[int, str]] = None
+
+
+# =============================================================================
+# Helpers
+# =============================================================================
 
 def _tokenize(text: str) -> List[str]:
     tokens = [t.lower() for t in _TOKEN_RE.findall(text or "")]
     return [t for t in tokens if len(t) >= _MIN_TOKEN_LEN and t not in _STOPWORDS]
 
 
+def _log(msg: str) -> None:
+    if _MATCHER_DEBUG:
+        print(f"[politician_matcher] {msg}")
+
+
+def _build_pid_to_normname() -> Dict[int, str]:
+    global _cached_pid_to_normname
+    if _cached_pid_to_normname is not None:
+        return _cached_pid_to_normname
+
+    out: Dict[int, str] = {}
+    for norm_full_name, pid in POLITICIAN_ID_MAP_NORMALIZED.items():
+        try:
+            out[int(pid)] = norm_full_name
+        except Exception:
+            continue
+
+    _cached_pid_to_normname = out
+    return out
+
+
 def _load_alias_map() -> Dict[str, int]:
     """
-    Loads politician_aliases from Supabase, builds:
-      alias_normalized -> politician_id
-
-    If table is empty/unavailable, returns {} safely.
+    TTL-cached alias map from Supabase:
+      politician_aliases(alias_normalized -> politician_id)
     """
-    global _cached_alias_map
-    if _cached_alias_map is not None:
+    global _cached_alias_map, _cached_alias_loaded_at
+
+    now = time.time()
+    if _cached_alias_map is not None and (now - _cached_alias_loaded_at) < _ALIAS_CACHE_TTL_SECONDS:
         return _cached_alias_map
 
     out: Dict[str, int] = {}
@@ -57,23 +103,28 @@ def _load_alias_map() -> Dict[str, int]:
         for r in rows:
             pid = r.get("politician_id")
             alias_n = r.get("alias_normalized")
-            if isinstance(pid, int) and isinstance(alias_n, str) and alias_n.strip():
-                out[alias_n.strip()] = int(pid)
-    except Exception:
-        # If table doesn't exist or API fails, do not break matching.
-        out = {}
+            if isinstance(alias_n, str) and alias_n.strip():
+                try:
+                    out[alias_n.strip()] = int(pid)
+                except Exception:
+                    continue
 
-    _cached_alias_map = out
-    return out
+        _cached_alias_map = out
+        _cached_alias_loaded_at = now
+        _log(f"aliases_loaded count={len(out)} ttl={_ALIAS_CACHE_TTL_SECONDS}s")
+
+    except Exception as e:
+        # Do not break matching if DB is unavailable.
+        _log(f"alias_load_failed err={e}")
+        _cached_alias_map = {}
+        _cached_alias_loaded_at = now
+
+    return _cached_alias_map or {}
 
 
 def _build_lastname_map() -> Dict[str, List[int]]:
     """
-    Builds a map from last-name token -> [politician_id, ...].
-    We only use last-name tokens that are distinctive enough:
-      - token length >= MIN
-      - token not a stopword
-      - token mapped to exactly one politician (unique) OR we keep list for later disambiguation
+    last-name token -> [politician_id, ...]
     """
     global _cached_lastname_map
     if _cached_lastname_map is not None:
@@ -81,103 +132,112 @@ def _build_lastname_map() -> Dict[str, List[int]]:
 
     last_map: Dict[str, List[int]] = {}
     for norm_full_name, pid in POLITICIAN_ID_MAP_NORMALIZED.items():
-        # norm_full_name is already normalized lowercase
-        parts = [p for p in norm_full_name.split() if p]
+        parts = [p for p in (norm_full_name or "").split() if p]
         if not parts:
             continue
-
         last = parts[-1]
         if len(last) < _MIN_TOKEN_LEN or last in _STOPWORDS:
             continue
-
-        last_map.setdefault(last, []).append(int(pid))
+        try:
+            last_map.setdefault(last, []).append(int(pid))
+        except Exception:
+            continue
 
     _cached_lastname_map = last_map
     return last_map
 
 
-# ---------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------
-def match_politician_id(text: str) -> Optional[int]:
+def _best_lastname_disambiguation(
+    candidates: Dict[int, int],
+    tokens: Set[str],
+) -> Tuple[Optional[int], int]:
     """
-    Returns a politician_id if a safe match is found, else None.
-
-    Matching strategy (in order):
-      1) Full-name substring match (exact normalized names)
-      2) Alias substring match (from politician_aliases.alias_normalized)
-      3) Last-name token match (only if unique last name OR disambiguated by presence of first-name token)
+    Returns (best_pid, best_score).
+    best_score uses:
+      base hits + 3 if first-name token also present
     """
-    t_norm = normalize_name(text or "")
-    if not t_norm:
-        return None
+    pid_to_norm = _build_pid_to_normname()
 
-    # 1) Full-name match (most reliable)
-    for norm_name, pid in POLITICIAN_ID_MAP_NORMALIZED.items():
-        if norm_name and norm_name in t_norm:
-            return int(pid)
-
-    # 2) Alias match (DB-driven; you control aliases)
-    alias_map = _load_alias_map()
-    if alias_map:
-        for alias_norm, pid in alias_map.items():
-            if alias_norm and alias_norm in t_norm:
-                return int(pid)
-
-    # 3) Last-name token match with guardrails
-    tokens = set(_tokenize(t_norm))
-    if not tokens:
-        return None
-
-    last_map = _build_lastname_map()
-
-    # Candidate IDs found via last-name tokens
-    candidates: Dict[int, int] = {}  # pid -> hit_count
-    for tok in tokens:
-        pids = last_map.get(tok)
-        if not pids:
-            continue
-        for pid in pids:
-            candidates[pid] = candidates.get(pid, 0) + 1
-
-    if not candidates:
-        return None
-
-    # If we have a single candidate, accept it.
-    if len(candidates) == 1:
-        return next(iter(candidates.keys()))
-
-    # If multiple candidates, attempt disambiguation:
-    # prefer candidate whose first-name token also appears.
-    # Example: if tok=spahiu matches multiple, but "bardh" appears too -> choose Bardh Spahia.
     best_pid: Optional[int] = None
     best_score = -1
 
     for pid, hits in candidates.items():
-        # fetch the normalized full name for this pid
-        # (reverse lookup is small; safe)
-        full_norm = None
-        for n, p in POLITICIAN_ID_MAP_NORMALIZED.items():
-            if int(p) == int(pid):
-                full_norm = n
-                break
-
-        score = hits
-        if full_norm:
-            parts = [x for x in full_norm.split() if x]
+        score = int(hits)
+        norm_full = pid_to_norm.get(int(pid))
+        if norm_full:
+            parts = [x for x in norm_full.split() if x]
             if parts:
                 first = parts[0]
-                # if first-name token appears in text, boost strongly
                 if first in tokens:
                     score += 3
 
         if score > best_score:
             best_score = score
-            best_pid = pid
+            best_pid = int(pid)
 
-    # Require a minimum confidence threshold for ambiguous cases
-    # (prevents random collisions on common surnames)
-    if best_score >= 4 and best_pid is not None:
-        return int(best_pid)
+    return best_pid, best_score
 
-    return None
+
+# =============================================================================
+# Public APIs
+# =============================================================================
+
+def match_politician_debug(text: str) -> MatchDebug:
+    """
+    Debuggable version of the matcher.
+    Non-breaking: you can call this from pipelines when you want diagnostics.
+    """
+    t_norm = normalize_name(text or "")
+    if not t_norm:
+        return MatchDebug(None, "empty", 0.0, {"reason": "empty_text"})
+
+    # 1) Full-name match
+    for norm_name, pid in POLITICIAN_ID_MAP_NORMALIZED.items():
+        if norm_name and norm_name in t_norm:
+            return MatchDebug(int(pid), "full_name", 0.98, {"matched": norm_name})
+
+    # 2) Alias match (TTL cached)
+    alias_map = _load_alias_map()
+    if alias_map:
+        for alias_norm, pid in alias_map.items():
+            if alias_norm and alias_norm in t_norm:
+                return MatchDebug(int(pid), "alias", 0.93, {"matched": alias_norm})
+
+    # 3) Last-name match with guardrails
+    tokens = set(_tokenize(t_norm))
+    if not tokens:
+        return MatchDebug(None, "no_tokens", 0.0, {"reason": "no_tokens"})
+
+    last_map = _build_lastname_map()
+
+    candidates: Dict[int, int] = {}
+    for tok in tokens:
+        pids = last_map.get(tok)
+        if not pids:
+            continue
+        for pid in pids:
+            candidates[int(pid)] = candidates.get(int(pid), 0) + 1
+
+    if not candidates:
+        return MatchDebug(None, "no_match", 0.0, {"tokens": sorted(tokens)[:20]})
+
+    if len(candidates) == 1:
+        pid = next(iter(candidates.keys()))
+        return MatchDebug(int(pid), "last_name_unique", 0.70, {"candidates": candidates})
+
+    best_pid, best_score = _best_lastname_disambiguation(candidates, tokens)
+
+    # Guardrail threshold for ambiguous cases
+    if best_pid is not None and best_score >= 4:
+        # Confidence is heuristic; ensure it stays < alias/full-name
+        conf = min(0.80, 0.55 + (best_score * 0.05))
+        return MatchDebug(int(best_pid), "last_name_disambiguated", conf, {"candidates": candidates, "best_score": best_score})
+
+    return MatchDebug(None, "ambiguous_low_conf", 0.0, {"candidates": candidates, "best_score": best_score})
+
+
+def match_politician_id(text: str) -> Optional[int]:
+    """
+    Backward compatible API used by your pipelines.
+    """
+    return match_politician_debug(text).politician_id

@@ -117,6 +117,12 @@ FEED_META: Dict[str, FeedMeta] = {
     "https://reporter.al/feed/":
         _meta("Reporter.al", 83, 0.92, 2, "albania", "general", "politics", "judiciary"),
 
+    # ---------------- Verified Albania expansion (tested & working) ----------------
+    "https://www.vizionplus.tv/feed/":
+        _meta("Vizion Plus", 68, 0.76, 2, "albania", "general", "politics", "vip"),
+    "https://abcnews.al/feed/":
+        _meta("ABC News Albania", 68, 0.76, 2, "albania", "general", "politics", "vip"),
+
     # ---------------- Global secondary (reliable RSS) ----------------
     "https://feeds.npr.org/1004/rss.xml":
         _meta("NPR World", 88, 0.95, 2, "global", "general", "politics"),
@@ -189,6 +195,9 @@ ALBANIAN_MEDIA_FEEDS: List[str] = [
     "https://balkanweb.com/feed",
     "https://euronews.al/feed",
     "https://reporter.al/feed/",
+    # Verified Albania expansion (tested & working)
+    "https://www.vizionplus.tv/feed/",
+    "https://abcnews.al/feed/",
 ]
 
 GLOBAL_SECONDARY_FEEDS: List[str] = [

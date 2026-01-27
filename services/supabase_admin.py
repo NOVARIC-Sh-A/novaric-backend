@@ -1,17 +1,19 @@
 # services/supabase_admin.py
 from __future__ import annotations
+
 import os
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
-try:
-    from supabase import create_client, Client  # type: ignore
-except Exception:  # pragma: no cover
-    create_client = None  # type: ignore
-    Client = object  # type: ignore
+# Type-only import to avoid runtime issues when supabase isn't installed
+if TYPE_CHECKING:  # pragma: no cover
+    from supabase import Client as SupabaseClient  # type: ignore
+else:  # pragma: no cover
+    SupabaseClient = object  # type: ignore
 
-_supabase_admin: Optional["Client"] = None
+_supabase_admin: Optional["SupabaseClient"] = None
 
-def get_supabase_admin() -> "Client":
+
+def get_supabase_admin() -> "SupabaseClient":
     """
     Cloud Run safe:
     - does not raise at import time
@@ -28,8 +30,11 @@ def get_supabase_admin() -> "Client":
     if not url or not key:
         raise RuntimeError("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY")
 
-    if create_client is None:
-        raise RuntimeError("supabase-py not installed or failed to import")
+    try:
+        # Import here to avoid import-time failures breaking server startup
+        from supabase import create_client  # type: ignore
+    except Exception as e:
+        raise RuntimeError("supabase-py not installed or failed to import") from e
 
     _supabase_admin = create_client(url, key)
     return _supabase_admin

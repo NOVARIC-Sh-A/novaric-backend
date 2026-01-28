@@ -138,6 +138,23 @@ app = FastAPI(
     redoc_url=None,
 )
 
+@app.get("/__supabase", include_in_schema=False)
+def supabase_diag():
+    try:
+        from utils.supabase_client import SUPABASE_URL, SUPABASE_KEY, SUPABASE_SERVICE_ROLE_KEY, SUPABASE_ANON_KEY, is_supabase_configured, supabase  # type: ignore
+        return {
+            "configured": bool(is_supabase_configured()),
+            "url_set": bool(SUPABASE_URL),
+            "url_preview": (SUPABASE_URL[:35] + "...") if SUPABASE_URL else "",
+            "service_role_set": bool(SUPABASE_SERVICE_ROLE_KEY),
+            "anon_set": bool(SUPABASE_ANON_KEY),
+            "key_in_use": "service_role" if SUPABASE_SERVICE_ROLE_KEY else ("anon" if SUPABASE_ANON_KEY else "missing"),
+            "client_created": bool(supabase is not None),
+        }
+    except Exception as e:
+        return {"error": str(e)}
+    
+
 # ================================================================
 # GLOBAL EXCEPTION LOGGING (DOES NOT CHANGE RESPONSE CONTRACTS)
 # ================================================================

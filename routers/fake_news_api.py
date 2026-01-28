@@ -1,7 +1,8 @@
 from fastapi import APIRouter, Query, HTTPException
-from utils.supabase_client import supabase
+from utils.supabase_client import supabase, is_supabase_configured
 
 router = APIRouter(prefix="/api/v1", tags=["Fake News"])
+
 
 @router.get("/case-studies")
 def list_case_studies(
@@ -11,6 +12,9 @@ def list_case_studies(
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
 ):
+    if not is_supabase_configured() or supabase is None:
+        raise HTTPException(status_code=503, detail="Supabase not configured")
+
     query = (
         supabase.table("case_studies")
         .select("*")
@@ -30,11 +34,14 @@ def list_case_studies(
     if getattr(res, "error", None):
         raise HTTPException(status_code=500, detail=str(res.error))
 
-    return {"data": res.data}
+    return {"data": res.data or []}
 
 
 @router.get("/case-studies/{case_id}")
 def get_case_study(case_id: str):
+    if not is_supabase_configured() or supabase is None:
+        raise HTTPException(status_code=503, detail="Supabase not configured")
+
     cs = (
         supabase.table("case_studies")
         .select("*")
@@ -58,4 +65,4 @@ def get_case_study(case_id: str):
     if getattr(modules, "error", None):
         raise HTTPException(status_code=500, detail=str(modules.error))
 
-    return {"data": {**cs.data, "modules": modules.data}}
+    return {"data": {**cs.data, "modules": (modules.data or [])}}

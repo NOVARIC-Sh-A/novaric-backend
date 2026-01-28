@@ -154,6 +154,27 @@ def supabase_diag():
     except Exception as e:
         return {"error": str(e)}
     
+@app.get("/__supabase_ping", include_in_schema=False)
+def __supabase_ping():
+    from utils.supabase_client import SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, SUPABASE_ANON_KEY, supabase, is_supabase_configured
+
+    info = {
+        "configured": bool(is_supabase_configured()),
+        "url_preview": (SUPABASE_URL[:45] + "...") if SUPABASE_URL else "",
+        "service_role_set": bool(SUPABASE_SERVICE_ROLE_KEY),
+        "anon_set": bool(SUPABASE_ANON_KEY),
+        "client_created": bool(supabase),
+    }
+
+    if not supabase:
+        return {**info, "ping": "no_client"}
+
+    try:
+        # minimal read: does not require your tables to exist
+        res = supabase.table("case_studies").select("id").limit(1).execute()
+        return {**info, "ping": "ok", "data_len": len(res.data or []), "error": str(getattr(res, "error", "")) or None}
+    except Exception as e:
+        return {**info, "ping": "exception", "error": str(e)}
 
 # ================================================================
 # GLOBAL EXCEPTION LOGGING (DOES NOT CHANGE RESPONSE CONTRACTS)

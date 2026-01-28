@@ -288,6 +288,28 @@ def _public_base_url(request: Optional[Request] = None) -> str:
             return ""
     return ""
 
+
+def _xml_escape(s: str) -> str:
+    # lightweight, safe XML escaping without extra deps
+    try:
+        from html import escape as _esc
+        return _esc(s or "", quote=True)
+    except Exception:
+        return (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _parse_dt(dt_str: Optional[str]) -> datetime:
+    if not dt_str:
+        return datetime.now(timezone.utc)
+    try:
+        return datetime.fromisoformat(str(dt_str).replace("Z", "+00:00")).astimezone(timezone.utc)
+    except Exception:
+        return datetime.now(timezone.utc)
+
 # ================================================================
 # ROOT / HEALTH
 # ================================================================
@@ -622,6 +644,41 @@ def _get_supabase_or_503():
         raise HTTPException(status_code=503, detail="Service temporarily unavailable")
 
 
+def _get_supabase_or_none():
+    """
+    SEO endpoints must never 503 for crawlers.
+    This helper returns None if Supabase is not ready.
+    """
+    try:
+        from utils.supabase_client import supabase, is_supabase_configured  # type: ignore
+        if not (supabase and is_supabase_configured()):
+            return None
+        return supabase
+    except Exception:
+        return None
+
+
+def _empty_sitemap_xml() -> str:
+    return "\n".join(
+        [
+            '<?xml version="1.0" encoding="UTF-8"?>',
+            '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">',
+            "</urlset>",
+        ]
+    )
+
+
+def _empty_rss_xml(base: str) -> str:
+    fg = FeedGenerator()
+    fg.id(f"{base}/rss.xml" if base else "/rss.xml")
+    fg.title("NOVARIC® Verified Updates")
+    fg.link(href=f"{base}/" if base else "/", rel="alternate")
+    fg.link(href=f"{base}/rss.xml" if base else "/rss.xml", rel="self")
+    fg.description("Verified updates, methodology notes, and published audits.")
+    fg.language("sq")
+    return fg.rss_str(pretty=True).decode("utf-8") if isinstance(fg.rss_str(pretty=True), (bytes, bytearray)) else str(fg.rss_str(pretty=True))
+
+
 dynamic_router = APIRouter(tags=["Dynamic Content"])
 
 @dynamic_router.get("/case-studies")
@@ -741,7 +798,8 @@ def get_verified_response(slug: str):
 
 @app.get("/sitemap.xml", include_in_schema=False)
 def sitemap(request: Request):
-    supabase = _get_supabase_or_503()
+    # ✅ DO NOT 503 for crawlers. Always return valid XML, even if empty.
+    supabase = _get_supabase_or_none()
     base = _public_base_url(request)
     if not base:
         # If base URL is missing, still produce a sitemap but with relative URLs.
@@ -749,31 +807,44 @@ def sitemap(request: Request):
 
     urls: List[Dict[str, str]] = []
 
-    # Case studies -> frontend route
-    cs = (
-        supabase.table("case_studies")
-        .select("id,updated_at,audited_at")
-        .eq("is_published", True)
-        .order("audited_at", desc=True)
-        .limit(5000)
-        .execute()
-    )
-    for row in (getattr(cs, "data", None) or []):
-        lastmod = row.get("updated_at") or row.get("audited_at") or datetime.now(timezone.utc).isoformat()
-        urls.append({"loc": f"{base}/fake-news/{row['id']}" if base else f"/fake-news/{row['id']}", "lastmod": lastmod})
+    if not supabase:
+        return Response(_empty_sitemap_xml(), media_type="application/xml")
 
-    # Verified responses -> frontend route
-    vr = (
-        supabase.table("verified_responses")
-        .select("slug,updated_at,published_at")
-        .eq("is_published", True)
-        .order("published_at", desc=True)
-        .limit(5000)
-        .execute()
-    )
-    for row in (getattr(vr, "data", None) or []):
-        lastmod = row.get("updated_at") or row.get("published_at") or datetime.now(timezone.utc).isoformat()
-        urls.append({"loc": f"{base}/verified/{row['slug']}" if base else f"/verified/{row['slug']}", "lastmod": lastmod})
+    try:
+        # Case studies -> frontend route
+        cs = (
+            supabase.table("case_studies")
+            .select("id,updated_at,audited_at")
+            .eq("is_published", True)
+            .order("audited_at", desc=True)
+            .limit(5000)
+            .execute()
+        )
+        for row in (getattr(cs, "data", None) or []):
+            if not isinstance(row, dict) or not row.get("id"):
+                continue
+            lastmod = row.get("updated_at") or row.get("audited_at") or datetime.now(timezone.utc).isoformat()
+            loc = f"{base}/fake-news/{row['id']}" if base else f"/fake-news/{row['id']}"
+            urls.append({"loc": loc, "lastmod": str(lastmod)})
+
+        # Verified responses -> frontend route
+        vr = (
+            supabase.table("verified_responses")
+            .select("slug,updated_at,published_at")
+            .eq("is_published", True)
+            .order("published_at", desc=True)
+            .limit(5000)
+            .execute()
+        )
+        for row in (getattr(vr, "data", None) or []):
+            if not isinstance(row, dict) or not row.get("slug"):
+                continue
+            lastmod = row.get("updated_at") or row.get("published_at") or datetime.now(timezone.utc).isoformat()
+            loc = f"{base}/verified/{row['slug']}" if base else f"/verified/{row['slug']}"
+            urls.append({"loc": loc, "lastmod": str(lastmod)})
+    except Exception as e:
+        logger.warning("Sitemap generation failed (returning empty sitemap): %s", e)
+        return Response(_empty_sitemap_xml(), media_type="application/xml")
 
     xml_lines = [
         '<?xml version="1.0" encoding="UTF-8"?>',
@@ -781,8 +852,8 @@ def sitemap(request: Request):
     ]
     for u in urls:
         xml_lines.append("<url>")
-        xml_lines.append(f"<loc>{u['loc']}</loc>")
-        xml_lines.append(f"<lastmod>{u['lastmod']}</lastmod>")
+        xml_lines.append(f"<loc>{_xml_escape(u['loc'])}</loc>")
+        xml_lines.append(f"<lastmod>{_xml_escape(u['lastmod'])}</lastmod>")
         xml_lines.append("</url>")
     xml_lines.append("</urlset>")
 
@@ -791,7 +862,8 @@ def sitemap(request: Request):
 
 @app.get("/rss.xml", include_in_schema=False)
 def rss(request: Request):
-    supabase = _get_supabase_or_503()
+    # ✅ DO NOT 503 for crawlers. Always return valid RSS, even if empty.
+    supabase = _get_supabase_or_none()
     base = _public_base_url(request)
     if not base:
         base = ""
@@ -804,32 +876,41 @@ def rss(request: Request):
     fg.description("Verified updates, methodology notes, and published audits.")
     fg.language("sq")
 
-    vr = (
-        supabase.table("verified_responses")
-        .select("title,slug,summary,published_at,updated_at")
-        .eq("is_published", True)
-        .order("published_at", desc=True)
-        .limit(50)
-        .execute()
-    )
+    if not supabase:
+        rss_str = fg.rss_str(pretty=True)
+        return Response(rss_str, media_type="application/rss+xml")
 
-    for row in (getattr(vr, "data", None) or []):
-        title = row.get("title") or "Verified Update"
-        slug = row.get("slug") or ""
-        summary = row.get("summary") or ""
-        published_at = row.get("published_at") or row.get("updated_at") or datetime.now(timezone.utc).isoformat()
+    try:
+        vr = (
+            supabase.table("verified_responses")
+            .select("title,slug,summary,published_at,updated_at")
+            .eq("is_published", True)
+            .order("published_at", desc=True)
+            .limit(50)
+            .execute()
+        )
 
-        fe = fg.add_entry()
-        fe.id(f"{base}/verified/{slug}" if base else f"/verified/{slug}")
-        fe.title(title)
-        fe.link(href=f"{base}/verified/{slug}" if base else f"/verified/{slug}")
-        fe.description(summary)
-        try:
-            # feedgen accepts datetime or RFC-2822; use datetime when possible
-            dt = datetime.fromisoformat(str(published_at).replace("Z", "+00:00"))
-            fe.pubDate(dt)
-        except Exception:
-            fe.pubDate(datetime.now(timezone.utc))
+        for row in (getattr(vr, "data", None) or []):
+            if not isinstance(row, dict):
+                continue
+            title = row.get("title") or "Verified Update"
+            slug = (row.get("slug") or "").strip()
+            if not slug:
+                continue
+            summary = row.get("summary") or ""
+            published_at = row.get("published_at") or row.get("updated_at") or datetime.now(timezone.utc).isoformat()
+
+            fe = fg.add_entry()
+            fe.id(f"{base}/verified/{slug}" if base else f"/verified/{slug}")
+            fe.title(str(title))
+            fe.link(href=f"{base}/verified/{slug}" if base else f"/verified/{slug}")
+            fe.description(str(summary))
+            fe.pubDate(_parse_dt(str(published_at)))
+
+    except Exception as e:
+        logger.warning("RSS generation failed (returning empty RSS shell): %s", e)
+        rss_str = fg.rss_str(pretty=True)
+        return Response(rss_str, media_type="application/rss+xml")
 
     return Response(fg.rss_str(pretty=True), media_type="application/rss+xml")
 

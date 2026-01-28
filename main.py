@@ -12,11 +12,12 @@ import logging
 import re
 from typing import List, Dict, Optional, Literal
 from urllib.parse import urlparse
-from datetime import datetime
+from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import feedparser
-from fastapi import FastAPI, Query, Request
+from feedgen.feed import FeedGenerator
+from fastapi import FastAPI, Query, Request, APIRouter, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.openapi.docs import get_swagger_ui_html
@@ -63,6 +64,7 @@ from utils.data_loader import load_profiles_data  # noqa: E402
 paragon_router = None
 enrichment_router = None
 politicians_router = None
+seo_router = None  # ✅ added
 
 try:
     from paragon_api import router as paragon_router  # type: ignore  # noqa: E402
@@ -81,6 +83,13 @@ try:
     logger.info("Politicians router loaded")
 except Exception as e:
     logger.warning("Politicians router not loaded yet: %s", e)
+
+# ✅ SEO router guarded import (startup-safe)
+try:
+    from routers.seo import router as seo_router  # type: ignore  # noqa: E402
+    logger.info("SEO router loaded")
+except Exception as e:
+    logger.exception("Failed to load SEO router (startup continues): %s", e)
 
 # ================================================================
 # FEED REGISTRY
@@ -258,6 +267,26 @@ def _epoch(ts: str) -> float:
         return datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
     except Exception:
         return 0.0
+
+
+def _public_base_url(request: Optional[Request] = None) -> str:
+    """
+    Public base URL used for sitemap/rss absolute URLs.
+    Priority:
+      1) PUBLIC_BASE_URL env
+      2) Request base URL (best-effort)
+      3) empty string (caller should handle)
+    """
+    env_base = (os.getenv("PUBLIC_BASE_URL") or "").strip().rstrip("/")
+    if env_base:
+        return env_base
+    if request is not None:
+        try:
+            # request.base_url includes trailing slash
+            return str(request.base_url).rstrip("/")
+        except Exception:
+            return ""
+    return ""
 
 # ================================================================
 # ROOT / HEALTH
@@ -564,6 +593,241 @@ async def get_news(category: str = Query(default="all")):
     return result
 
 # ================================================================
+# DYNAMIC REPUTATION CONTENT API (FAKE NEWS + VERIFIED RESPONSES)
+# ================================================================
+# This section adds:
+# - /api/v1/case-studies and /api/case-studies (legacy)
+# - /api/v1/verified-responses and /api/verified-responses (legacy)
+# plus SEO endpoints:
+# - /sitemap.xml
+# - /rss.xml
+#
+# These are safe additions and do not modify existing routes/contracts.
+# ================================================================
+
+def _get_supabase_or_503():
+    try:
+        from utils.supabase_client import supabase, is_supabase_configured  # type: ignore
+        if not (supabase and is_supabase_configured()):
+            raise RuntimeError("Supabase not configured")
+        return supabase
+    except Exception as e:
+        logger.warning("Supabase unavailable for dynamic content endpoints: %s", e)
+        raise HTTPException(status_code=503, detail="Service temporarily unavailable")
+
+
+dynamic_router = APIRouter(tags=["Dynamic Content"])
+
+@dynamic_router.get("/case-studies")
+def list_case_studies(
+    q: str | None = Query(default=None),
+    source: str | None = Query(default=None),
+    verdict: str | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+):
+    supabase = _get_supabase_or_503()
+
+    query = (
+        supabase.table("case_studies")
+        .select("*")
+        .eq("is_published", True)
+        .order("audited_at", desc=True)
+        .range(offset, offset + limit - 1)
+    )
+
+    if source:
+        query = query.eq("source", source)
+    if verdict:
+        query = query.eq("verdict", verdict)
+    if q:
+        query = query.ilike("headline", f"%{q}%")
+
+    res = query.execute()
+    err = getattr(res, "error", None)
+    if err:
+        logger.warning("case_studies query failed: %s", err)
+        raise HTTPException(status_code=500, detail="Database error")
+
+    return {"data": getattr(res, "data", None) or []}
+
+
+@dynamic_router.get("/case-studies/{case_id}")
+def get_case_study(case_id: str):
+    supabase = _get_supabase_or_503()
+
+    cs = (
+        supabase.table("case_studies")
+        .select("*")
+        .eq("id", case_id)
+        .eq("is_published", True)
+        .single()
+        .execute()
+    )
+
+    cs_err = getattr(cs, "error", None)
+    if cs_err or not getattr(cs, "data", None):
+        raise HTTPException(status_code=404, detail="Not found")
+
+    mods = (
+        supabase.table("case_modules")
+        .select("*")
+        .eq("case_id", case_id)
+        .order("sort_order", desc=False)
+        .execute()
+    )
+
+    mods_err = getattr(mods, "error", None)
+    if mods_err:
+        logger.warning("case_modules query failed: %s", mods_err)
+        raise HTTPException(status_code=500, detail="Database error")
+
+    return {"data": {**cs.data, "modules": getattr(mods, "data", None) or []}}
+
+
+@dynamic_router.get("/verified-responses")
+def list_verified_responses(
+    topic: str | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+):
+    supabase = _get_supabase_or_503()
+
+    qy = (
+        supabase.table("verified_responses")
+        .select("id,title,slug,summary,topic,published_at,updated_at,related_case_id")
+        .eq("is_published", True)
+        .order("published_at", desc=True)
+        .range(offset, offset + limit - 1)
+    )
+
+    if topic:
+        qy = qy.eq("topic", topic)
+
+    res = qy.execute()
+    err = getattr(res, "error", None)
+    if err:
+        logger.warning("verified_responses query failed: %s", err)
+        raise HTTPException(status_code=500, detail="Database error")
+
+    return {"data": getattr(res, "data", None) or []}
+
+
+@dynamic_router.get("/verified-responses/{slug}")
+def get_verified_response(slug: str):
+    supabase = _get_supabase_or_503()
+
+    res = (
+        supabase.table("verified_responses")
+        .select("*")
+        .eq("slug", slug)
+        .eq("is_published", True)
+        .single()
+        .execute()
+    )
+
+    err = getattr(res, "error", None)
+    if err or not getattr(res, "data", None):
+        raise HTTPException(status_code=404, detail="Not found")
+
+    return {"data": res.data}
+
+
+@app.get("/sitemap.xml", include_in_schema=False)
+def sitemap(request: Request):
+    supabase = _get_supabase_or_503()
+    base = _public_base_url(request)
+    if not base:
+        # If base URL is missing, still produce a sitemap but with relative URLs.
+        base = ""
+
+    urls: List[Dict[str, str]] = []
+
+    # Case studies -> frontend route
+    cs = (
+        supabase.table("case_studies")
+        .select("id,updated_at,audited_at")
+        .eq("is_published", True)
+        .order("audited_at", desc=True)
+        .limit(5000)
+        .execute()
+    )
+    for row in (getattr(cs, "data", None) or []):
+        lastmod = row.get("updated_at") or row.get("audited_at") or datetime.now(timezone.utc).isoformat()
+        urls.append({"loc": f"{base}/fake-news/{row['id']}" if base else f"/fake-news/{row['id']}", "lastmod": lastmod})
+
+    # Verified responses -> frontend route
+    vr = (
+        supabase.table("verified_responses")
+        .select("slug,updated_at,published_at")
+        .eq("is_published", True)
+        .order("published_at", desc=True)
+        .limit(5000)
+        .execute()
+    )
+    for row in (getattr(vr, "data", None) or []):
+        lastmod = row.get("updated_at") or row.get("published_at") or datetime.now(timezone.utc).isoformat()
+        urls.append({"loc": f"{base}/verified/{row['slug']}" if base else f"/verified/{row['slug']}", "lastmod": lastmod})
+
+    xml_lines = [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">',
+    ]
+    for u in urls:
+        xml_lines.append("<url>")
+        xml_lines.append(f"<loc>{u['loc']}</loc>")
+        xml_lines.append(f"<lastmod>{u['lastmod']}</lastmod>")
+        xml_lines.append("</url>")
+    xml_lines.append("</urlset>")
+
+    return Response("\n".join(xml_lines), media_type="application/xml")
+
+
+@app.get("/rss.xml", include_in_schema=False)
+def rss(request: Request):
+    supabase = _get_supabase_or_503()
+    base = _public_base_url(request)
+    if not base:
+        base = ""
+
+    fg = FeedGenerator()
+    fg.id(f"{base}/rss.xml" if base else "/rss.xml")
+    fg.title("NOVARIC® Verified Updates")
+    fg.link(href=f"{base}/" if base else "/", rel="alternate")
+    fg.link(href=f"{base}/rss.xml" if base else "/rss.xml", rel="self")
+    fg.description("Verified updates, methodology notes, and published audits.")
+    fg.language("sq")
+
+    vr = (
+        supabase.table("verified_responses")
+        .select("title,slug,summary,published_at,updated_at")
+        .eq("is_published", True)
+        .order("published_at", desc=True)
+        .limit(50)
+        .execute()
+    )
+
+    for row in (getattr(vr, "data", None) or []):
+        title = row.get("title") or "Verified Update"
+        slug = row.get("slug") or ""
+        summary = row.get("summary") or ""
+        published_at = row.get("published_at") or row.get("updated_at") or datetime.now(timezone.utc).isoformat()
+
+        fe = fg.add_entry()
+        fe.id(f"{base}/verified/{slug}" if base else f"/verified/{slug}")
+        fe.title(title)
+        fe.link(href=f"{base}/verified/{slug}" if base else f"/verified/{slug}")
+        fe.description(summary)
+        try:
+            # feedgen accepts datetime or RFC-2822; use datetime when possible
+            dt = datetime.fromisoformat(str(published_at).replace("Z", "+00:00"))
+            fe.pubDate(dt)
+        except Exception:
+            fe.pubDate(datetime.now(timezone.utc))
+
+    return Response(fg.rss_str(pretty=True), media_type="application/rss+xml")
+
+# ================================================================
 # ROUTER MOUNTING (AUTHORITATIVE + LEGACY COMPAT)
 # ================================================================
 # Goal:
@@ -599,6 +863,13 @@ if enrichment_router:
 if politicians_router:
     _mount_router_twice(politicians_router, name="POLITICIANS")
 
+# ✅ Mount SEO router under both prefixes (consistent with others)
+if seo_router:
+    _mount_router_twice(seo_router, name="SEO")
+
+# Mount dynamic content router (Fake News + Verified Responses) under both prefixes
+_mount_router_twice(dynamic_router, name="DYNAMIC_CONTENT")
+
 # ================================================================
 # LIFECYCLE
 # ================================================================
@@ -614,6 +885,7 @@ def startup_event():
             supabase_service_role_set,
         )
         logger.info("API prefixes: v1=%s | legacy=%s", API_V1_PREFIX, API_LEGACY_PREFIX)
+        logger.info("ENV: PUBLIC_BASE_URL=%s", (os.getenv("PUBLIC_BASE_URL") or "").strip() or "(not set)")
     except Exception:
         pass
 

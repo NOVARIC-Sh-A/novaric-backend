@@ -24,7 +24,7 @@ Notes:
 
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 from utils.paragon_constants import PARAGON_DIMENSIONS
 
@@ -32,7 +32,7 @@ from utils.paragon_constants import PARAGON_DIMENSIONS
 # ------------------------------------------------------------
 # Normalization ranges for metrics (min, max)
 # ------------------------------------------------------------
-RANGES: Dict[str, tuple[float, float]] = {
+RANGES: Dict[str, Tuple[float, float]] = {
     "scandals_flagged": (0, 10),            # inverse
     "wealth_declaration_issues": (0, 5),    # inverse
     "public_projects_completed": (0, 50),
@@ -233,7 +233,6 @@ def _order_dimensions(dims: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             score = 0
 
         score = max(0, min(100, score))
-
         by_name[name] = {"dimension": name, "score": score}
 
     ordered: List[Dict[str, Any]] = []
@@ -263,7 +262,6 @@ def score_metrics(metrics: Dict[str, Any]) -> Dict[str, Any]:
           "momentum": {"raw": float, "score": int}
         }
     """
-
     # ------------------------------------------------------------
     # Option B2: neutral defaulting for sparse/unknown rows
     # ------------------------------------------------------------

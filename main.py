@@ -854,6 +854,7 @@ def _mount_router_twice(router_obj, *, name: str):
     except Exception as e:
         logger.warning("Failed to mount %s router at %s: %s", name, API_V1_PREFIX, e)
 
+
 if paragon_router:
     _mount_router_twice(paragon_router, name="PARAGON")
 
@@ -863,12 +864,18 @@ if enrichment_router:
 if politicians_router:
     _mount_router_twice(politicians_router, name="POLITICIANS")
 
-# ✅ Mount SEO router under both prefixes (consistent with others)
+# ✅ SEO must be mounted at ROOT for crawlers:
+#    /sitemap.xml and /rss.xml
 if seo_router:
-    _mount_router_twice(seo_router, name="SEO")
+    try:
+        app.include_router(seo_router)
+        logger.info("Mounted SEO router at root")
+    except Exception as e:
+        logger.warning("Failed to mount SEO router at root: %s", e)
 
-# Mount dynamic content router (Fake News + Verified Responses) under both prefixes
-_mount_router_twice(dynamic_router, name="DYNAMIC_CONTENT")
+# ✅ Dynamic content router (Fake News + Verified Responses) under both prefixes
+if dynamic_router:
+    _mount_router_twice(dynamic_router, name="DYNAMIC_CONTENT")
 
 # ================================================================
 # LIFECYCLE

@@ -379,3 +379,100 @@ def fetch_live_paragon_data() -> List[Dict[str, Any]]:
 # ----------------------------------------------------
 def fetch_table(table: str, select: str = "*") -> List[Dict[str, Any]]:
     return _get(table, {"select": select})
+
+
+# ----------------------------------------------------
+# REST fallback that mimics the subset of supabase-py we use
+# ----------------------------------------------------
+class _RestQuery:
+    def __init__(self, table: str):
+        self._table = table
+        self._select = "*"
+        self._filters: list[tuple[str, str, str]] = []  # (col, op, val)
+        self._order: tuple[str, bool] | None = None     # (col, desc)
+        self._range: tuple[int, int] | None = None
+        self._single = False
+
+    def select(self, cols: str):
+        self._select = cols or "*"
+        return self
+
+    def eq(self, col: str, val: object):
+        self._filters.append((col, "eq", str(val)))
+        return self
+
+    def ilike(self, col: str, pattern: str):
+        self._filters.append((col, "ilike", pattern))
+        return self
+
+    def in_(self, col: str, values: list[str]):
+        # PostgREST expects: col=in.(a,b,c)
+        joined = ",".join(values)
+        self._filters.append((col, "in", f"({joined})"))
+        return self
+
+    def order(self, col: str, desc: bool = False):
+        self._order = (col, bool(desc))
+        return self
+
+    def range(self, start: int, end: int):
+        self._range = (int(start), int(end))
+        return self
+
+    def limit(self, n: int):
+        # emulate limit by range(0, n-1) if range not set
+        if self._range is None:
+            self._range = (0, int(n) - 1)
+        return self
+
+    def single(self):
+        self._single = True
+        return self
+
+    def execute(self):
+        # Build PostgREST params
+        params: dict[str, object] = {"select": self._select}
+
+        for col, op, val in self._filters:
+            if op == "eq":
+                params[col] = f"eq.{val}"
+            elif op == "ilike":
+                params[col] = f"ilike.{val}"
+            elif op == "in":
+                params[col] = f"in.{val}"
+
+        if self._order:
+            col, desc = self._order
+            params["order"] = f"{col}.{'desc' if desc else 'asc'}"
+
+        # range is handled by Content-Range headers normally,
+        # but Supabase accepts `offset` and `limit` too.
+        # We'll translate range -> offset/limit to keep it simple.
+        if self._range:
+            start, end = self._range
+            params["offset"] = str(start)
+            params["limit"] = str(max(0, end - start + 1))
+
+        try:
+            data = _get(self._table, params)  # uses your existing REST helper
+            if self._single:
+                item = data[0] if data else None
+                return type("Resp", (), {"data": item, "error": None})
+            return type("Resp", (), {"data": data, "error": None})
+        except Exception as e:
+            return type("Resp", (), {"data": None, "error": str(e)})
+
+
+class _RestSupabase:
+    def table(self, name: str):
+        return _RestQuery(name)
+
+
+def get_supabase_client():
+    """
+    Returns supabase-py client if available, otherwise REST fallback.
+    Never returns None when configured.
+    """
+    if is_supabase_configured():
+        return supabase if supabase is not None else _RestSupabase()
+    return None

@@ -652,10 +652,11 @@ async def get_news(category: str = Query(default="all")):
 
 def _get_supabase_or_503():
     try:
-        from utils.supabase_client import supabase, is_supabase_configured  # type: ignore
-        if not (supabase and is_supabase_configured()):
+        from utils.supabase_client import get_supabase_client, is_supabase_configured  # type: ignore
+        client = get_supabase_client()
+        if not (client and is_supabase_configured()):
             raise RuntimeError("Supabase not configured")
-        return supabase
+        return client
     except Exception as e:
         logger.warning("Supabase unavailable for dynamic content endpoints: %s", e)
         raise HTTPException(status_code=503, detail="Service temporarily unavailable")

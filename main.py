@@ -309,9 +309,15 @@ def root():
     }
 
 
-@app.get("/healthz", include_in_schema=False)
-def health_probe():
+@app.get(f"{API_V1_PREFIX}/healthz", include_in_schema=False)
+def health_probe_v1():
     return {"status": "healthy"}
+
+
+@app.get(f"{API_LEGACY_PREFIX}/healthz", include_in_schema=False)
+def health_probe_legacy():
+    return {"status": "healthy"}
+
 
 # ================================================================
 # NEWS API (AUTHORITATIVE UNDER /api/v1)

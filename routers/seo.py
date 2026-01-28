@@ -20,20 +20,6 @@ def _iso(dt_str: Optional[str]) -> str:
     return dt_str or _now_iso()
 
 
-def _parse_dt(dt_str: Optional[str]) -> datetime:
-    """
-    Parse ISO timestamps safely; always return a timezone-aware UTC datetime.
-    FeedGenerator prefers datetime objects for pubDate.
-    """
-    if not dt_str:
-        return datetime.now(timezone.utc)
-    try:
-        # Handles "Z" suffix
-        return datetime.fromisoformat(str(dt_str).replace("Z", "+00:00")).astimezone(timezone.utc)
-    except Exception:
-        return datetime.now(timezone.utc)
-
-
 def _base_url(request: Request) -> str:
     """
     Priority:
@@ -47,40 +33,21 @@ def _base_url(request: Request) -> str:
     if base:
         return base
 
-    # Derive from request (works behind most proxies if forwarded headers are configured)
     return str(request.base_url).rstrip("/")
 
 
-def _supabase_ready() -> bool:
-    """
-    True only when Supabase is configured and client is initialized.
-    """
+def _supabase_available() -> bool:
     return bool(is_supabase_configured() and supabase is not None)
-
-
-def _empty_sitemap() -> Response:
-    xml = [
-        '<?xml version="1.0" encoding="UTF-8"?>',
-        '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">',
-        "</urlset>",
-    ]
-    return Response("\n".join(xml), media_type="application/xml")
 
 
 @router.get("/sitemap.xml", include_in_schema=False)
 def sitemap(request: Request):
-    """
-    Always returns valid XML (never 503).
-    If Supabase is not ready or queries fail, returns an empty sitemap rather than an error.
-    """
     base = _base_url(request)
 
-    if not _supabase_ready():
-        return _empty_sitemap()
-
+    # Always return valid XML (even if Supabase is down)
     urls: list[dict[str, str]] = []
 
-    try:
+    if _supabase_available():
         # Case studies
         cs = (
             supabase.table("case_studies")
@@ -90,9 +57,8 @@ def sitemap(request: Request):
             .limit(5000)
             .execute()
         )
-        for row in (cs.data or []):
-            if not isinstance(row, dict) or not row.get("id"):
-                continue
+
+        for row in (getattr(cs, "data", None) or []):
             loc = f"{base}/fake-news/{row['id']}"
             lastmod = _iso(row.get("updated_at") or row.get("audited_at"))
             urls.append({"loc": loc, "lastmod": lastmod})
@@ -106,36 +72,29 @@ def sitemap(request: Request):
             .limit(5000)
             .execute()
         )
-        for row in (vr.data or []):
-            if not isinstance(row, dict) or not row.get("slug"):
-                continue
+
+        for row in (getattr(vr, "data", None) or []):
             loc = f"{base}/verified/{row['slug']}"
             lastmod = _iso(row.get("updated_at") or row.get("published_at"))
             urls.append({"loc": loc, "lastmod": lastmod})
-    except Exception:
-        # Crawler-safe fallback: empty sitemap
-        return _empty_sitemap()
 
     xml = [
         '<?xml version="1.0" encoding="UTF-8"?>',
         '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">',
     ]
+
     for u in urls:
         xml.append("<url>")
         xml.append(f"<loc>{xml_escape(u['loc'])}</loc>")
         xml.append(f"<lastmod>{xml_escape(u['lastmod'])}</lastmod>")
         xml.append("</url>")
-    xml.append("</urlset>")
 
+    xml.append("</urlset>")
     return Response("\n".join(xml), media_type="application/xml")
 
 
 @router.get("/rss.xml", include_in_schema=False)
 def rss(request: Request):
-    """
-    Always returns valid RSS (never 503).
-    If Supabase is not ready or queries fail, returns a valid empty feed shell.
-    """
     base = _base_url(request)
 
     fg = FeedGenerator()
@@ -146,10 +105,8 @@ def rss(request: Request):
     fg.description("Verified updates, methodology notes, and audited case studies.")
     fg.language("sq")
 
-    if not _supabase_ready():
-        return Response(fg.rss_str(pretty=True), media_type="application/rss+xml")
-
-    try:
+    # Always return valid RSS (even if Supabase is down)
+    if _supabase_available():
         vr = (
             supabase.table("verified_responses")
             .select("title,slug,summary,published_at,updated_at")
@@ -159,19 +116,16 @@ def rss(request: Request):
             .execute()
         )
 
-        for row in (vr.data or []):
-            if not isinstance(row, dict):
-                continue
-
-            slug = (row.get("slug") or "").strip()
-            if not slug:
-                continue
-
-            title = (row.get("title") or "Verified Update").strip()
+        for row in (getattr(vr, "data", None) or []):
+            slug = row.get("slug") or ""
+            title = row.get("title") or "Verified Update"
             summary = row.get("summary") or ""
 
             raw_dt = row.get("published_at") or row.get("updated_at")
-            dt = _parse_dt(str(raw_dt) if raw_dt else None)
+            try:
+                dt = datetime.fromisoformat(str(raw_dt).replace("Z", "+00:00")) if raw_dt else datetime.now(timezone.utc)
+            except Exception:
+                dt = datetime.now(timezone.utc)
 
             fe = fg.add_entry()
             fe.id(f"{base}/verified/{slug}")
@@ -179,9 +133,5 @@ def rss(request: Request):
             fe.link(href=f"{base}/verified/{slug}")
             fe.description(summary)
             fe.pubDate(dt)
-
-    except Exception:
-        # Return valid feed shell even if Supabase errors out
-        return Response(fg.rss_str(pretty=True), media_type="application/rss+xml")
 
     return Response(fg.rss_str(pretty=True), media_type="application/rss+xml")

@@ -10,6 +10,11 @@ Goals:
   - supabase_upsert  (with safe fallback when ON CONFLICT cannot be used)
   - fetch_live_paragon_data
   - fetch_table
+
+Extra reliability:
+- Expose why supabase-py client creation failed (SUPABASE_CLIENT_INIT_ERROR).
+- Provide an always-available REST fallback that mimics the subset of supabase-py
+  used by your routers (.table().select().eq().order().range().single().execute()).
 """
 
 from __future__ import annotations
@@ -49,7 +54,7 @@ SUPABASE_URL: str = _env_first("SUPABASE_URL")
 SUPABASE_SERVICE_ROLE_KEY: str = _env_first(
     "SUPABASE_SERVICE_ROLE_KEY",
     "SUPABASE_SERVICE_ROLE_KE",  # common truncation typo
-    "SUPABASE_SERVICE_KEY",      # occasional alternative naming
+    "SUPABASE_SERVICE_KEY",  # occasional alternative naming
 )
 
 SUPABASE_ANON_KEY: str = _env_first(
@@ -60,7 +65,6 @@ SUPABASE_ANON_KEY: str = _env_first(
 # Prefer SERVICE ROLE key for server-side writes
 SUPABASE_KEY: str = SUPABASE_SERVICE_ROLE_KEY or SUPABASE_ANON_KEY
 
-
 # ----------------------------------------------------
 # Supabase URL sanity checks (prevents "YOUR_SUPABASE_URL" failures)
 # ----------------------------------------------------
@@ -68,7 +72,8 @@ def _looks_like_placeholder(url: str) -> bool:
     u = (url or "").strip().lower()
     return (
         not u
-        or u in {
+        or u
+        in {
             "your_supabase_url",
             "supabase_url",
             "http://your_supabase_url",
@@ -101,20 +106,6 @@ def _validate_supabase_url(url: str) -> str:
 
 # Normalize once
 SUPABASE_URL = _validate_supabase_url(SUPABASE_URL)
-
-
-# ----------------------------------------------------
-# supabase-py client (optional)
-# ----------------------------------------------------
-supabase = None  # type: ignore
-try:
-    from supabase import create_client  # type: ignore
-
-    if SUPABASE_URL and SUPABASE_KEY:
-        supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-except Exception:
-    supabase = None  # type: ignore
-
 
 # ----------------------------------------------------
 # Requests session (REST helpers)
@@ -172,13 +163,11 @@ def _rest_url() -> str:
 def _headers(*, prefer: Optional[str] = None) -> Dict[str, str]:
     _ensure_config()
 
-    # Supabase now supports both:
+    # Supabase supports both:
     # - Legacy JWT keys: "eyJhbGciOi..."
     # - New API keys: "sb_publishable_..." / "sb_secret_..."
     #
     # PostgREST expects apikey and Authorization Bearer.
-    # For sb_* keys, Bearer still works in current Supabase,
-    # but we keep this logic centralized in case of future change.
     key = SUPABASE_KEY
 
     h: Dict[str, str] = {
@@ -389,7 +378,7 @@ class _RestQuery:
         self._table = table
         self._select = "*"
         self._filters: list[tuple[str, str, str]] = []  # (col, op, val)
-        self._order: tuple[str, bool] | None = None     # (col, desc)
+        self._order: tuple[str, bool] | None = None  # (col, desc)
         self._range: tuple[int, int] | None = None
         self._single = False
 
@@ -407,7 +396,7 @@ class _RestQuery:
 
     def in_(self, col: str, values: list[str]):
         # PostgREST expects: col=in.(a,b,c)
-        joined = ",".join(values)
+        joined = ",".join([str(v) for v in values])
         self._filters.append((col, "in", f"({joined})"))
         return self
 
@@ -445,9 +434,7 @@ class _RestQuery:
             col, desc = self._order
             params["order"] = f"{col}.{'desc' if desc else 'asc'}"
 
-        # range is handled by Content-Range headers normally,
-        # but Supabase accepts `offset` and `limit` too.
-        # We'll translate range -> offset/limit to keep it simple.
+        # Supabase REST supports offset + limit
         if self._range:
             start, end = self._range
             params["offset"] = str(start)
@@ -468,11 +455,57 @@ class _RestSupabase:
         return _RestQuery(name)
 
 
+# ----------------------------------------------------
+# supabase-py client (optional) + init diagnostics
+# ----------------------------------------------------
+SUPABASE_CLIENT_INIT_ERROR: Optional[str] = None
+
+
+def _create_supabase_py_client():
+    """
+    Try to create supabase-py client. Never raises.
+    Sets SUPABASE_CLIENT_INIT_ERROR on failure.
+    """
+    global SUPABASE_CLIENT_INIT_ERROR
+    SUPABASE_CLIENT_INIT_ERROR = None
+
+    if not (SUPABASE_URL and SUPABASE_KEY):
+        SUPABASE_CLIENT_INIT_ERROR = "SUPABASE_URL or SUPABASE_KEY missing/invalid"
+        return None
+
+    try:
+        from supabase import create_client  # type: ignore
+    except Exception as e:
+        SUPABASE_CLIENT_INIT_ERROR = f"import supabase failed: {e}"
+        return None
+
+    try:
+        return create_client(SUPABASE_URL, SUPABASE_KEY)
+    except Exception as e:
+        SUPABASE_CLIENT_INIT_ERROR = f"create_client failed: {e}"
+        return None
+
+
+# This is what your routers import and use: `from utils.supabase_client import supabase`
+# We guarantee:
+# - None if NOT configured
+# - supabase-py client if possible
+# - REST fallback if configured but supabase-py fails
+_supabase_py = _create_supabase_py_client()
+supabase = None  # type: ignore
+if is_supabase_configured():
+    supabase = _supabase_py if _supabase_py is not None else _RestSupabase()
+else:
+    supabase = None  # type: ignore
+
+
 def get_supabase_client():
     """
-    Returns supabase-py client if available, otherwise REST fallback.
-    Never returns None when configured.
+    Returns a usable client (supabase-py OR REST fallback) when configured.
+    If not configured, returns None.
+
+    Also exposes SUPABASE_CLIENT_INIT_ERROR for diagnostics.
     """
-    if is_supabase_configured():
-        return supabase if supabase is not None else _RestSupabase()
-    return None
+    if not is_supabase_configured():
+        return None
+    return supabase

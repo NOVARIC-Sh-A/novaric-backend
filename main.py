@@ -1000,13 +1000,32 @@ def _mount_router_twice(router_obj, *, name: str):
     Safe to call only when router_obj is not None.
     """
     try:
-        app.include_router(router_obj, prefix=API_LEGACY_PREFIX)
+        _router_prefix = str(getattr(router_obj, "prefix", "") or "")
+        _router_prefix_norm = _router_prefix.rstrip("/") if _router_prefix else ""
+        _router_has_legacy = bool(_router_prefix_norm and _router_prefix_norm.startswith(API_LEGACY_PREFIX))
+        _router_has_v1 = bool(_router_prefix_norm and _router_prefix_norm.startswith(API_V1_PREFIX))
+        _router_has_absolute = bool(_router_has_legacy or _router_has_v1)
+    except Exception:
+        _router_prefix = ""
+        _router_prefix_norm = ""
+        _router_has_legacy = False
+        _router_has_v1 = False
+        _router_has_absolute = False
+
+    try:
+        if _router_has_absolute:
+            app.include_router(router_obj, prefix="")
+        else:
+            app.include_router(router_obj, prefix=API_LEGACY_PREFIX)
         logger.info("Mounted %s router at %s", name, API_LEGACY_PREFIX)
     except Exception as e:
         logger.warning("Failed to mount %s router at %s: %s", name, API_LEGACY_PREFIX, e)
 
     try:
-        app.include_router(router_obj, prefix=API_V1_PREFIX)
+        if _router_has_absolute:
+            app.include_router(router_obj, prefix="")
+        else:
+            app.include_router(router_obj, prefix=API_V1_PREFIX)
         logger.info("Mounted %s router at %s", name, API_V1_PREFIX)
     except Exception as e:
         logger.warning("Failed to mount %s router at %s: %s", name, API_V1_PREFIX, e)

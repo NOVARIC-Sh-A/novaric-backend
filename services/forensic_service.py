@@ -27,6 +27,7 @@ def create_snapshot_for_case(vector_id: str):
 
     # upload html
     html_path = f"{vector_id}/snap_{seq}/source.html"
+    html_path = f"{vector_id}/snap_{int(seq):04d}/source.html"
     html_uri = upload_text("forensic-snapshots", html_path, payload["html"], "text/html")
 
     # create snapshot row (deactivate old active first)
@@ -68,3 +69,155 @@ def create_snapshot_for_case(vector_id: str):
     })
 
     return {"snapshotId": snapshot["id"], "snapshotSeq": seq, "contentHashSha256": payload["content_hash_sha256"]}
+
+def run_analysis_for_case(vector_id: str):
+    case = get_case_by_vector(vector_id)
+    if not case:
+        raise Exception("Case not found")
+
+    # load active snapshot
+    snap_res = (
+        db()
+        .table("forensic_snapshots")
+        .select("*")
+        .eq("case_id", case["id"])
+        .eq("is_active", True)
+        .limit(1)
+        .execute()
+    )
+    snapshot = (snap_res.data or [None])[0]
+    if not snapshot:
+        raise Exception("No active snapshot")
+
+    # next analysis version
+    ver_res = (
+        db()
+        .table("forensic_analyses")
+        .select("analysis_version")
+        .eq("case_id", case["id"])
+        .order("analysis_version", desc=True)
+        .limit(1)
+        .execute()
+    )
+    next_ver = (int(ver_res.data[0]["analysis_version"]) + 1) if (ver_res.data or []) else 1
+
+    # minimal analysis payload (keeps your pipeline runnable now)
+    analysis_payload = {
+        "case_id": case["id"],
+        "snapshot_id": snapshot["id"],
+        "analysis_version": next_ver,
+        "engine_version": "CIDA_v2.4",
+        "status": "COMPLETED",
+        "forensic_segments": [],
+        "evidence_points": [],
+        "fallacies": [],
+        "ethics_scorecard": [],
+        "rebuttal_ledger": [],
+        "verdict": {},
+        "metrics": {},
+        "created_by": "system",
+    }
+
+    ins = db().table("forensic_analyses").insert(analysis_payload).execute()
+    analysis = ins.data[0] if (ins.data or []) else None
+    if not analysis:
+        raise Exception("Analysis insert failed")
+
+    # update case status
+    db().table("forensic_cases").update({"status": "ANALYZED"}).eq("id", case["id"]).execute()
+
+    insert_event(case["id"], "ANALYSIS_COMPLETED", snapshot_id=snapshot["id"], analysis_id=analysis["id"], payload={
+        "analysis_version": next_ver,
+        "engine_version": "CIDA_v2.4",
+    })
+
+    return {"analysisId": analysis["id"], "analysisVersion": next_ver, "status": analysis.get("status")}
+
+def get_forensic_page_payload(vector_id: str, version: str = "latest"):
+    case = get_case_by_vector(vector_id)
+    if not case:
+        return {"data": None}
+
+    snap_res = (
+        db()
+        .table("forensic_snapshots")
+        .select("*")
+        .eq("case_id", case["id"])
+        .eq("is_active", True)
+        .limit(1)
+        .execute()
+    )
+    snapshot = (snap_res.data or [None])[0]
+
+    artifacts = None
+    if snapshot:
+        art_res = (
+            db()
+            .table("forensic_artifacts")
+            .select("*")
+            .eq("snapshot_id", snapshot["id"])
+            .limit(1)
+            .execute()
+        )
+        artifacts = (art_res.data or [None])[0]
+
+    analysis = None
+    if version == "latest":
+        an_res = (
+            db()
+            .table("forensic_analyses")
+            .select("*")
+            .eq("case_id", case["id"])
+            .order("analysis_version", desc=True)
+            .limit(1)
+            .execute()
+        )
+        analysis = (an_res.data or [None])[0]
+    else:
+        try:
+            v = int(version)
+        except Exception:
+            v = 0
+        if v > 0:
+            an_res = (
+                db()
+                .table("forensic_analyses")
+                .select("*")
+                .eq("case_id", case["id"])
+                .eq("analysis_version", v)
+                .limit(1)
+                .execute()
+            )
+            analysis = (an_res.data or [None])[0]
+
+    def _sign(uri: str, expires_in: int = 600) -> str:
+        if not uri or "/" not in uri:
+            return ""
+        bucket, path = uri.split("/", 1)
+        try:
+            r = db().storage.from_(bucket).create_signed_url(path, expires_in)
+            if isinstance(r, dict) and r.get("signedURL"):
+                return r["signedURL"]
+            if hasattr(r, "get") and r.get("signedURL"):
+                return r.get("signedURL")  # type: ignore
+            return ""
+        except Exception:
+            return ""
+
+    if snapshot and isinstance(snapshot, dict):
+        html_uri = snapshot.get("html_archive_uri") or ""
+        pdf_uri = snapshot.get("pdf_uri") or ""
+        shots = snapshot.get("screenshots_uris") or []
+
+        snapshot["html_archive_signed_url"] = _sign(str(html_uri), 600) if html_uri else ""
+        snapshot["pdf_signed_url"] = _sign(str(pdf_uri), 600) if pdf_uri else ""
+        snapshot["screenshots_signed_urls"] = [_sign(str(x), 600) for x in (shots or [])] if isinstance(shots, list) else []
+
+    return {
+        "data": {
+            "case": case,
+            "snapshot": snapshot,
+            "artifacts": artifacts,
+            "analysis": analysis,
+        }
+    }

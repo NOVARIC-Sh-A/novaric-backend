@@ -61,12 +61,14 @@ SUPABASE_URL: str = _env_first("SUPABASE_URL")
 # service role key can be misnamed in some deployments; tolerate safely
 SUPABASE_SECRET_KEY: str = _env_first(
     "SUPABASE_SECRET_KEY",
+    "SUPABASE_SERVICE_ROLE_KEY",  # legacy name
     "SUPABASE_SERVICE_ROLE_KE",  # common truncation typo
     "SUPABASE_SERVICE_KEY",  # occasional alternative naming
 )
 
 SUPABASE_PUBLISHABLE_KEY: str = _env_first(
     "SUPABASE_PUBLISHABLE_KEY",
+    "SUPABASE_ANON_KEY",  # legacy name
     "SUPABASE_KEY",  # some stacks export anon as SUPABASE_KEY
 )
 
@@ -608,8 +610,7 @@ SUPABASE_CLIENT_INIT_ERROR: Optional[str] = None
 def _is_jwt_like(key: str) -> bool:
     """
     Legacy Supabase keys are JWT-like (three dot-separated parts).
-    New sb_secret/sb_publishable keys are NOT JWT-like and may break supabase-py
-    depending on the installed version.
+    New sb_secret/sb_publishable keys are NOT JWT-like.
     """
     k = (key or "").strip()
     return k.count(".") == 2
@@ -619,17 +620,16 @@ def _create_supabase_py_client():
     """
     Try to create supabase-py client. Never raises.
     Sets SUPABASE_CLIENT_INIT_ERROR on failure.
+
+    IMPORTANT (Path A):
+    With supabase>=2.0, both legacy JWT keys and new sb_* keys are supported.
+    So we DO NOT skip client creation for non-JWT keys anymore.
     """
     global SUPABASE_CLIENT_INIT_ERROR
     SUPABASE_CLIENT_INIT_ERROR = None
 
     if not (SUPABASE_URL and SUPABASE_KEY):
         SUPABASE_CLIENT_INIT_ERROR = "SUPABASE_URL or SUPABASE_KEY missing/invalid"
-        return None
-
-    # Avoid noisy failures when using new non-JWT keys (sb_secret_/sb_publishable_)
-    if not _is_jwt_like(SUPABASE_KEY):
-        SUPABASE_CLIENT_INIT_ERROR = "create_client skipped: key is not JWT-like (likely sb_secret/sb_publishable)"
         return None
 
     try:
@@ -641,6 +641,7 @@ def _create_supabase_py_client():
     try:
         return create_client(SUPABASE_URL, SUPABASE_KEY)
     except Exception as e:
+        # Keep a useful error message for Cloud Run logs
         SUPABASE_CLIENT_INIT_ERROR = f"create_client failed: {e}"
         return None
 

@@ -146,48 +146,101 @@ app = FastAPI(
     redoc_url=None,
 )
 
+# ================================================================
+# SUPABASE DIAGNOSTICS (CLOUD RUN SAFE)
+# ================================================================
 @app.get("/__supabase", include_in_schema=False)
 def __supabase():
-    from utils.supabase_client import (
-        SUPABASE_URL,
-        SUPABASE_SECRET_KEY,
-        SUPABASE_PUBLISHABLE_KEY,
-        supabase,
-        is_supabase_configured,
-        SUPABASE_CLIENT_INIT_ERROR,
-    )
+    """
+    Environment + client initialization diagnostics.
+    Must never crash (Cloud Run friendly).
+    """
+    try:
+        from utils.supabase_client import (  # noqa: WPS433 (runtime import intended)
+            SUPABASE_URL,
+            SUPABASE_SECRET_KEY,
+            SUPABASE_PUBLISHABLE_KEY,
+            supabase,
+            is_supabase_configured,
+            SUPABASE_CLIENT_INIT_ERROR,
+        )
 
-    return {
-        "configured": bool(is_supabase_configured()),
-        "url_set": bool(SUPABASE_URL),
-        "url_preview": (SUPABASE_URL[:45] + "...") if SUPABASE_URL else "",
-        "service_role_set": bool(SUPABASE_SECRET_KEY),
-        "anon_set": bool(SUPABASE_PUBLISHABLE_KEY),
-        "key_in_use": "service_role"
-        if SUPABASE_SECRET_KEY
-        else ("anon" if SUPABASE_PUBLISHABLE_KEY else "none"),
-        "client_created": bool(supabase),
-        "client_init_error": SUPABASE_CLIENT_INIT_ERROR,
-    }
+        key_in_use = "none"
+        if SUPABASE_SECRET_KEY:
+            key_in_use = "secret"
+        elif SUPABASE_PUBLISHABLE_KEY:
+            key_in_use = "publishable"
+
+        return {
+            "configured": bool(is_supabase_configured()),
+            "url_set": bool(SUPABASE_URL),
+            "url_preview": (SUPABASE_URL[:45] + "...") if SUPABASE_URL else "",
+            "service_role_set": bool(SUPABASE_SECRET_KEY),  # keep legacy field name for clients
+            "anon_set": bool(SUPABASE_PUBLISHABLE_KEY),      # keep legacy field name for clients
+            "key_in_use": key_in_use,
+            "client_created": bool(supabase),
+            "client_init_error": SUPABASE_CLIENT_INIT_ERROR,
+        }
+    except Exception as e:
+        return {
+            "configured": False,
+            "url_set": bool(os.getenv("SUPABASE_URL")),
+            "service_role_set": bool(os.getenv("SUPABASE_SECRET_KEY")),
+            "anon_set": bool(os.getenv("SUPABASE_PUBLISHABLE_KEY")),
+            "key_in_use": "none",
+            "client_created": False,
+            "client_init_error": f"diag_import_failed: {e}",
+        }
+
 
 def supabase_diag():
+    """
+    Backward-compatible helper used in some call-sites.
+    """
     try:
-        from utils.supabase_client import SUPABASE_URL, SUPABASE_KEY, SUPABASE_SECRET_KEY, SUPABASE_PUBLISHABLE_KEY, is_supabase_configured, supabase  # type: ignore
+        from utils.supabase_client import (  # type: ignore
+            SUPABASE_URL,
+            SUPABASE_SECRET_KEY,
+            SUPABASE_PUBLISHABLE_KEY,
+            is_supabase_configured,
+            supabase,
+        )
+
+        key_in_use = "none"
+        if SUPABASE_SECRET_KEY:
+            key_in_use = "secret"
+        elif SUPABASE_PUBLISHABLE_KEY:
+            key_in_use = "publishable"
+
         return {
             "configured": bool(is_supabase_configured()),
             "url_set": bool(SUPABASE_URL),
             "url_preview": (SUPABASE_URL[:45] + "...") if SUPABASE_URL else "",
             "service_role_set": bool(SUPABASE_SECRET_KEY),
             "anon_set": bool(SUPABASE_PUBLISHABLE_KEY),
-            "key_in_use": "service_role" if SUPABASE_SECRET_KEY else ("anon" if SUPABASE_PUBLISHABLE_KEY else "missing"),
+            "key_in_use": key_in_use if key_in_use != "none" else "missing",
             "client_created": bool(supabase is not None),
         }
     except Exception as e:
         return {"error": str(e)}
-    
+
+
 @app.get("/__supabase_ping", include_in_schema=False)
 def __supabase_ping():
-    from utils.supabase_client import SUPABASE_URL, SUPABASE_SECRET_KEY, SUPABASE_PUBLISHABLE_KEY, supabase, is_supabase_configured
+    """
+    Minimal ping to verify PostgREST connectivity.
+    Uses a lightweight select. If your table doesn't exist, you'll see an error.
+    """
+    try:
+        from utils.supabase_client import (  # noqa: WPS433
+            SUPABASE_URL,
+            SUPABASE_SECRET_KEY,
+            SUPABASE_PUBLISHABLE_KEY,
+            supabase,
+            is_supabase_configured,
+        )
+    except Exception as e:
+        return {"configured": False, "ping": "import_failed", "error": str(e)}
 
     info = {
         "configured": bool(is_supabase_configured()),
@@ -201,9 +254,14 @@ def __supabase_ping():
         return {**info, "ping": "no_client"}
 
     try:
-        # minimal read: does not require your tables to exist
+        # minimal read
         res = supabase.table("case_studies").select("id").limit(1).execute()
-        return {**info, "ping": "ok", "data_len": len(res.data or []), "error": str(getattr(res, "error", "")) or None}
+        return {
+            **info,
+            "ping": "ok",
+            "data_len": len(getattr(res, "data", None) or []),
+            "error": str(getattr(res, "error", "")) or None,
+        }
     except Exception as e:
         return {**info, "ping": "exception", "error": str(e)}
 
@@ -746,10 +804,12 @@ def _empty_rss_xml(base: str) -> str:
     fg.link(href=f"{base}/rss.xml" if base else "/rss.xml", rel="self")
     fg.description("Verified updates, methodology notes, and published audits.")
     fg.language("sq")
-    return fg.rss_str(pretty=True).decode("utf-8") if isinstance(fg.rss_str(pretty=True), (bytes, bytearray)) else str(fg.rss_str(pretty=True))
+    rss_bytes = fg.rss_str(pretty=True)
+    return rss_bytes.decode("utf-8") if isinstance(rss_bytes, (bytes, bytearray)) else str(rss_bytes)
 
 
 dynamic_router = APIRouter(tags=["Dynamic Content"])
+
 
 @dynamic_router.get("/case-studies")
 def list_case_studies(
@@ -872,7 +932,6 @@ def sitemap(request: Request):
     supabase = _get_supabase_or_none()
     base = _public_base_url(request)
     if not base:
-        # If base URL is missing, still produce a sitemap but with relative URLs.
         base = ""
 
     urls: List[Dict[str, str]] = []
@@ -881,7 +940,6 @@ def sitemap(request: Request):
         return Response(_empty_sitemap_xml(), media_type="application/xml")
 
     try:
-        # Case studies -> frontend route
         cs = (
             supabase.table("case_studies")
             .select("id,updated_at,audited_at")
@@ -897,7 +955,6 @@ def sitemap(request: Request):
             loc = f"{base}/fake-news/{row['id']}" if base else f"/fake-news/{row['id']}"
             urls.append({"loc": loc, "lastmod": str(lastmod)})
 
-        # Verified responses -> frontend route
         vr = (
             supabase.table("verified_responses")
             .select("slug,updated_at,published_at")
@@ -987,11 +1044,6 @@ def rss(request: Request):
 # ================================================================
 # ROUTER MOUNTING (AUTHORITATIVE + LEGACY COMPAT)
 # ================================================================
-# Goal:
-# - Keep existing clients working on /api/...
-# - Introduce clean, consistent /api/v1/... for routers as well.
-# This prevents frontend confusion and eliminates broken links over time.
-
 def _mount_router_twice(router_obj, *, name: str):
     """
     Mounts a router under both legacy and v1 prefixes:
@@ -1044,7 +1096,6 @@ if forensic_router:
     _mount_router_twice(forensic_router, name="FORENSIC")
 
 # ✅ SEO must be mounted at ROOT for crawlers:
-#    /sitemap.xml and /rss.xml
 if seo_router:
     try:
         app.include_router(seo_router)
@@ -1064,11 +1115,11 @@ def startup_event():
     logger.info("NOVARIC Backend started successfully.")
     try:
         supabase_url_set = bool(os.getenv("SUPABASE_URL"))
-        supabase_service_role_set = bool(os.getenv("SUPABASE_SECRET_KEY"))
+        supabase_secret_set = bool(os.getenv("SUPABASE_SECRET_KEY"))
         logger.info(
             "ENV: SUPABASE_URL set=%s | SUPABASE_SECRET_KEY set=%s",
             supabase_url_set,
-            supabase_service_role_set,
+            supabase_secret_set,
         )
         logger.info("API prefixes: v1=%s | legacy=%s", API_V1_PREFIX, API_LEGACY_PREFIX)
         logger.info("ENV: PUBLIC_BASE_URL=%s", (os.getenv("PUBLIC_BASE_URL") or "").strip() or "(not set)")

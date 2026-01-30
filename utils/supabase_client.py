@@ -15,6 +15,14 @@ Extra reliability:
 - Expose why supabase-py client creation failed (SUPABASE_CLIENT_INIT_ERROR).
 - Provide an always-available REST fallback that mimics the subset of supabase-py
   used by your routers (.table().select().eq().order().range().single().execute()).
+
+NEW (required for your current production key format sb_secret_* / sb_publishable_*):
+- Always-available Supabase Storage REST upload helpers:
+  - storage_upload_bytes
+  - storage_upload_text
+- Split keys:
+  - SUPABASE_READ_KEY  (prefer anon)
+  - SUPABASE_ADMIN_KEY (service role only; required for writes/storage)
 """
 
 from __future__ import annotations
@@ -62,14 +70,15 @@ SUPABASE_ANON_KEY: str = _env_first(
     "SUPABASE_KEY",  # some stacks export anon as SUPABASE_KEY
 )
 
-# Prefer SERVICE ROLE key for server-side writes
-SUPABASE_KEY: str = SUPABASE_ANON_KEY or SUPABASE_SERVICE_ROLE_KEY
-
 # NEW:
 # - READ key: prefer anon if available (least privilege); otherwise fall back to service role
-# - ADMIN key: service role ONLY (hard requirement for writes)
+# - ADMIN key: service role ONLY (hard requirement for writes/storage)
 SUPABASE_READ_KEY: str = SUPABASE_ANON_KEY or SUPABASE_SERVICE_ROLE_KEY
 SUPABASE_ADMIN_KEY: str = SUPABASE_SERVICE_ROLE_KEY
+
+# Back-compat (some call-sites expect SUPABASE_KEY)
+# We point SUPABASE_KEY to READ key (least privilege by default).
+SUPABASE_KEY: str = SUPABASE_READ_KEY
 
 # ----------------------------------------------------
 # Supabase URL sanity checks (prevents "YOUR_SUPABASE_URL" failures)
@@ -166,7 +175,12 @@ def _rest_url() -> str:
     return f"{SUPABASE_URL}/rest/v1"
 
 
-def _headers(*, prefer: Optional[str] = None, key: Optional[str] = None) -> Dict[str, str]:
+def _storage_url() -> str:
+    _ensure_config()
+    return f"{SUPABASE_URL}/storage/v1"
+
+
+def _headers(*, prefer: Optional[str] = None, key: Optional[str] = None, content_type: Optional[str] = None) -> Dict[str, str]:
     _ensure_config()
 
     # Supabase supports both:
@@ -182,8 +196,14 @@ def _headers(*, prefer: Optional[str] = None, key: Optional[str] = None) -> Dict
     h: Dict[str, str] = {
         "apikey": key,
         "Authorization": f"Bearer {key}",
-        "Content-Type": "application/json",
     }
+
+    # Default JSON content-type for PostgREST operations
+    if content_type:
+        h["Content-Type"] = content_type
+    else:
+        h["Content-Type"] = "application/json"
+
     if prefer:
         h["Prefer"] = prefer
     return h
@@ -234,7 +254,7 @@ def _get(path: str, params: Dict[str, Any]) -> List[Dict[str, Any]]:
     resp = _session.get(url, headers=_headers(key=SUPABASE_READ_KEY), params=params, timeout=20)
 
     if resp.status_code == 401:
-        raise RuntimeError("Unauthorized: Invalid Supabase API key (check service role key).")
+        raise RuntimeError("Unauthorized: Invalid Supabase API key (check anon/service role key).")
 
     if resp.status_code >= 400:
         raise RuntimeError(f"Supabase GET error {resp.status_code}: {resp.text}")
@@ -371,6 +391,42 @@ def supabase_upsert(
 
 
 # ----------------------------------------------------
+# Supabase Storage REST upload helpers (sb_secret_ compatible)
+# ----------------------------------------------------
+def storage_upload_bytes(bucket: str, path: str, content: bytes, content_type: str) -> str:
+    """
+    Upload bytes to Supabase Storage using REST.
+    Requires SUPABASE_SERVICE_ROLE_KEY (ADMIN key) in production for private buckets.
+    Returns "bucket/path" (stable internal URI format).
+    """
+    if not SUPABASE_ADMIN_KEY:
+        raise RuntimeError("Unauthorized: SERVICE_ROLE_KEY invalid or missing (Storage).")
+
+    url = f"{_storage_url()}/object/{bucket}/{path.lstrip('/')}"
+    resp = _session.post(
+        url,
+        headers={
+            **_headers(key=SUPABASE_ADMIN_KEY, content_type=content_type),
+            "x-upsert": "true",
+        },
+        data=content,
+        timeout=30,
+    )
+
+    if resp.status_code == 401:
+        raise RuntimeError("Unauthorized: SERVICE_ROLE_KEY invalid or missing (Storage).")
+
+    if resp.status_code >= 400:
+        raise RuntimeError(f"Storage upload failed [{resp.status_code}]: {resp.text}")
+
+    return f"{bucket}/{path.lstrip('/')}"
+
+
+def storage_upload_text(bucket: str, path: str, content: str, content_type: str = "text/html") -> str:
+    return storage_upload_bytes(bucket, path, (content or "").encode("utf-8"), content_type)
+
+
+# ----------------------------------------------------
 # Fetch PARAGON + joined politician data
 # ----------------------------------------------------
 def fetch_live_paragon_data() -> List[Dict[str, Any]]:
@@ -390,6 +446,7 @@ def fetch_table(table: str, select: str = "*") -> List[Dict[str, Any]]:
 
 # ----------------------------------------------------
 # REST fallback that mimics the subset of supabase-py we use
+# (extended to cover insert/update/upsert used by forensic services)
 # ----------------------------------------------------
 class _RestQuery:
     def __init__(self, table: str):
@@ -400,8 +457,30 @@ class _RestQuery:
         self._range: tuple[int, int] | None = None
         self._single = False
 
+        # write ops
+        self._op: str = "select"  # select | insert | update | upsert
+        self._payload: Any = None
+        self._upsert_conflict: Optional[str] = None
+
     def select(self, cols: str):
+        self._op = "select"
         self._select = cols or "*"
+        return self
+
+    def insert(self, payload: Any):
+        self._op = "insert"
+        self._payload = payload
+        return self
+
+    def update(self, payload: Dict[str, Any]):
+        self._op = "update"
+        self._payload = payload
+        return self
+
+    def upsert(self, payload: Any, *, on_conflict: Optional[str] = None):
+        self._op = "upsert"
+        self._payload = payload
+        self._upsert_conflict = on_conflict
         return self
 
     def eq(self, col: str, val: object):
@@ -436,8 +515,7 @@ class _RestQuery:
         self._single = True
         return self
 
-    def execute(self):
-        # Build PostgREST params
+    def _build_params(self) -> dict[str, object]:
         params: dict[str, object] = {"select": self._select}
 
         for col, op, val in self._filters:
@@ -458,12 +536,60 @@ class _RestQuery:
             params["offset"] = str(start)
             params["limit"] = str(max(0, end - start + 1))
 
+        return params
+
+    def execute(self):
         try:
-            data = _get(self._table, params)  # uses your existing REST helper
-            if self._single:
-                item = data[0] if data else None
-                return type("Resp", (), {"data": item, "error": None})
-            return type("Resp", (), {"data": data, "error": None})
+            if self._op == "select":
+                params = self._build_params()
+                data = _get(self._table, params)
+                if self._single:
+                    item = data[0] if data else None
+                    return type("Resp", (), {"data": item, "error": None})
+                return type("Resp", (), {"data": data, "error": None})
+
+            if self._op == "insert":
+                payload = self._payload
+                records: List[Dict[str, Any]]
+                if isinstance(payload, list):
+                    records = payload
+                elif isinstance(payload, dict):
+                    records = [payload]
+                else:
+                    raise RuntimeError("insert payload must be dict or list[dict]")
+                data = supabase_insert(self._table, records)
+                return type("Resp", (), {"data": data, "error": None})
+
+            if self._op == "update":
+                if not isinstance(self._payload, dict):
+                    raise RuntimeError("update payload must be dict")
+                where_params: Dict[str, str] = {}
+                for col, op, val in self._filters:
+                    if op == "eq":
+                        where_params[col] = f"eq.{val}"
+                    elif op == "ilike":
+                        where_params[col] = f"ilike.{val}"
+                    elif op == "in":
+                        where_params[col] = f"in.{val}"
+                data = _patch(self._table, where_params, self._payload)
+                return type("Resp", (), {"data": data, "error": None})
+
+            if self._op == "upsert":
+                payload = self._payload
+                conflict_col = (self._upsert_conflict or "").strip()
+                if not conflict_col:
+                    raise RuntimeError("upsert requires on_conflict=<column>")
+                records2: List[Dict[str, Any]]
+                if isinstance(payload, list):
+                    records2 = payload
+                elif isinstance(payload, dict):
+                    records2 = [payload]
+                else:
+                    raise RuntimeError("upsert payload must be dict or list[dict]")
+                data = supabase_upsert(self._table, records2, conflict_col)
+                return type("Resp", (), {"data": data, "error": None})
+
+            raise RuntimeError(f"Unsupported operation: {self._op}")
         except Exception as e:
             return type("Resp", (), {"data": None, "error": str(e)})
 
@@ -542,3 +668,12 @@ def get_supabase_client():
     if not is_supabase_configured():
         return None
     return supabase
+
+
+# Back-compat: some services expect db() / get_supabase_admin()
+def db():
+    return get_supabase_client()
+
+
+def get_supabase_admin():
+    return get_supabase_client()

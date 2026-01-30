@@ -31,12 +31,8 @@ def upload_text(
     Uploads UTF-8 text content to Supabase Storage.
     Returns a simple URI string in the form: "{bucket}/{path}"
     """
-    sb = db()
-    sb.storage.from_(bucket).upload(
-        path,
-        content.encode("utf-8"),
-        {"content-type": content_type, "upsert": True},
-    )
+    from utils.supabase_client import storage_upload_text  # REST-based; sb_secret_ compatible
+    storage_upload_text(bucket, path, content, content_type=content_type)
     return f"{bucket}/{path}"
 
 
@@ -50,12 +46,8 @@ def upload_bytes(
     Uploads raw bytes to Supabase Storage.
     Returns a simple URI string in the form: "{bucket}/{path}"
     """
-    sb = db()
-    sb.storage.from_(bucket).upload(
-        path,
-        content,
-        {"content-type": content_type, "upsert": True},
-    )
+    from utils.supabase_client import storage_upload_bytes  # REST-based; sb_secret_ compatible
+    storage_upload_bytes(bucket, path, content, content_type=content_type)
     return f"{bucket}/{path}"
 
 

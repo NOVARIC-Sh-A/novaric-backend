@@ -59,22 +59,22 @@ def _env_first(*names: str) -> str:
 SUPABASE_URL: str = _env_first("SUPABASE_URL")
 
 # service role key can be misnamed in some deployments; tolerate safely
-SUPABASE_SERVICE_ROLE_KEY: str = _env_first(
-    "SUPABASE_SERVICE_ROLE_KEY",
+SUPABASE_SECRET_KEY: str = _env_first(
+    "SUPABASE_SECRET_KEY",
     "SUPABASE_SERVICE_ROLE_KE",  # common truncation typo
     "SUPABASE_SERVICE_KEY",  # occasional alternative naming
 )
 
-SUPABASE_ANON_KEY: str = _env_first(
-    "SUPABASE_ANON_KEY",
+SUPABASE_PUBLISHABLE_KEY: str = _env_first(
+    "SUPABASE_PUBLISHABLE_KEY",
     "SUPABASE_KEY",  # some stacks export anon as SUPABASE_KEY
 )
 
 # NEW:
 # - READ key: prefer anon if available (least privilege); otherwise fall back to service role
 # - ADMIN key: service role ONLY (hard requirement for writes/storage)
-SUPABASE_READ_KEY: str = SUPABASE_ANON_KEY or SUPABASE_SERVICE_ROLE_KEY
-SUPABASE_ADMIN_KEY: str = SUPABASE_SERVICE_ROLE_KEY
+SUPABASE_READ_KEY: str = SUPABASE_PUBLISHABLE_KEY or SUPABASE_SECRET_KEY
+SUPABASE_ADMIN_KEY: str = SUPABASE_SECRET_KEY
 
 # Back-compat (some call-sites expect SUPABASE_KEY)
 # We point SUPABASE_KEY to READ key (least privilege by default).
@@ -164,8 +164,8 @@ def _ensure_config() -> None:
         )
     if not (SUPABASE_READ_KEY or SUPABASE_ADMIN_KEY):
         raise RuntimeError(
-            "No Supabase API key found. Set SUPABASE_SERVICE_ROLE_KEY (recommended) "
-            "or SUPABASE_ANON_KEY."
+            "No Supabase API key found. Set SUPABASE_SECRET_KEY (recommended) "
+            "or SUPABASE_PUBLISHABLE_KEY."
         )
 
 
@@ -396,7 +396,7 @@ def supabase_upsert(
 def storage_upload_bytes(bucket: str, path: str, content: bytes, content_type: str) -> str:
     """
     Upload bytes to Supabase Storage using REST.
-    Requires SUPABASE_SERVICE_ROLE_KEY (ADMIN key) in production for private buckets.
+    Requires SUPABASE_SECRET_KEY (ADMIN key) in production for private buckets.
     Returns "bucket/path" (stable internal URI format).
     """
     if not SUPABASE_ADMIN_KEY:

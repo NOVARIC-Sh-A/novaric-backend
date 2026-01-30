@@ -150,8 +150,8 @@ app = FastAPI(
 def __supabase():
     from utils.supabase_client import (
         SUPABASE_URL,
-        SUPABASE_SERVICE_ROLE_KEY,
-        SUPABASE_ANON_KEY,
+        SUPABASE_SECRET_KEY,
+        SUPABASE_PUBLISHABLE_KEY,
         supabase,
         is_supabase_configured,
         SUPABASE_CLIENT_INIT_ERROR,
@@ -161,25 +161,25 @@ def __supabase():
         "configured": bool(is_supabase_configured()),
         "url_set": bool(SUPABASE_URL),
         "url_preview": (SUPABASE_URL[:45] + "...") if SUPABASE_URL else "",
-        "service_role_set": bool(SUPABASE_SERVICE_ROLE_KEY),
-        "anon_set": bool(SUPABASE_ANON_KEY),
+        "service_role_set": bool(SUPABASE_SECRET_KEY),
+        "anon_set": bool(SUPABASE_PUBLISHABLE_KEY),
         "key_in_use": "service_role"
-        if SUPABASE_SERVICE_ROLE_KEY
-        else ("anon" if SUPABASE_ANON_KEY else "none"),
+        if SUPABASE_SECRET_KEY
+        else ("anon" if SUPABASE_PUBLISHABLE_KEY else "none"),
         "client_created": bool(supabase),
         "client_init_error": SUPABASE_CLIENT_INIT_ERROR,
     }
 
 def supabase_diag():
     try:
-        from utils.supabase_client import SUPABASE_URL, SUPABASE_KEY, SUPABASE_SERVICE_ROLE_KEY, SUPABASE_ANON_KEY, is_supabase_configured, supabase  # type: ignore
+        from utils.supabase_client import SUPABASE_URL, SUPABASE_KEY, SUPABASE_SECRET_KEY, SUPABASE_PUBLISHABLE_KEY, is_supabase_configured, supabase  # type: ignore
         return {
             "configured": bool(is_supabase_configured()),
             "url_set": bool(SUPABASE_URL),
             "url_preview": (SUPABASE_URL[:45] + "...") if SUPABASE_URL else "",
-            "service_role_set": bool(SUPABASE_SERVICE_ROLE_KEY),
-            "anon_set": bool(SUPABASE_ANON_KEY),
-            "key_in_use": "service_role" if SUPABASE_SERVICE_ROLE_KEY else ("anon" if SUPABASE_ANON_KEY else "missing"),
+            "service_role_set": bool(SUPABASE_SECRET_KEY),
+            "anon_set": bool(SUPABASE_PUBLISHABLE_KEY),
+            "key_in_use": "service_role" if SUPABASE_SECRET_KEY else ("anon" if SUPABASE_PUBLISHABLE_KEY else "missing"),
             "client_created": bool(supabase is not None),
         }
     except Exception as e:
@@ -187,13 +187,13 @@ def supabase_diag():
     
 @app.get("/__supabase_ping", include_in_schema=False)
 def __supabase_ping():
-    from utils.supabase_client import SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, SUPABASE_ANON_KEY, supabase, is_supabase_configured
+    from utils.supabase_client import SUPABASE_URL, SUPABASE_SECRET_KEY, SUPABASE_PUBLISHABLE_KEY, supabase, is_supabase_configured
 
     info = {
         "configured": bool(is_supabase_configured()),
         "url_preview": (SUPABASE_URL[:45] + "...") if SUPABASE_URL else "",
-        "service_role_set": bool(SUPABASE_SERVICE_ROLE_KEY),
-        "anon_set": bool(SUPABASE_ANON_KEY),
+        "service_role_set": bool(SUPABASE_SECRET_KEY),
+        "anon_set": bool(SUPABASE_PUBLISHABLE_KEY),
         "client_created": bool(supabase),
     }
 
@@ -1064,9 +1064,9 @@ def startup_event():
     logger.info("NOVARIC Backend started successfully.")
     try:
         supabase_url_set = bool(os.getenv("SUPABASE_URL"))
-        supabase_service_role_set = bool(os.getenv("SUPABASE_SERVICE_ROLE_KEY"))
+        supabase_service_role_set = bool(os.getenv("SUPABASE_SECRET_KEY"))
         logger.info(
-            "ENV: SUPABASE_URL set=%s | SUPABASE_SERVICE_ROLE_KEY set=%s",
+            "ENV: SUPABASE_URL set=%s | SUPABASE_SECRET_KEY set=%s",
             supabase_url_set,
             supabase_service_role_set,
         )

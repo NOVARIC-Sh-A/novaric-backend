@@ -13,10 +13,10 @@ from mock_profiles import PROFILES as MOCK_PROFILES
 load_dotenv()
 
 SUPABASE_URL: str = os.environ.get("SUPABASE_URL")
-SUPABASE_KEY: str = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")  # service role
+SUPABASE_KEY: str = os.environ.get("SUPABASE_SECRET_KEY")  # service role
 
 if not SUPABASE_URL or not SUPABASE_KEY:
-    raise Exception("SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY not found in environment.")
+    raise Exception("SUPABASE_URL or SUPABASE_SECRET_KEY not found in environment.")
 
 SUPABASE: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 

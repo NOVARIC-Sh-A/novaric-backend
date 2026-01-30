@@ -8,7 +8,7 @@ import urllib.parse
 from typing import Any, Dict, List, Optional, Tuple
 
 SUPABASE_URL = os.environ["SUPABASE_URL"].rstrip("/")
-SUPABASE_SERVICE_ROLE_KEY = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
+SUPABASE_SECRET_KEY = os.environ["SUPABASE_SECRET_KEY"]
 PROFILES_JSON = os.environ.get("PROFILES_JSON", "profiles_seed.json")
 SUPABASE_TABLE = os.environ.get("SUPABASE_TABLE", "profiles")
 BATCH_SIZE = int(os.environ.get("BATCH_SIZE", "200"))
@@ -19,8 +19,8 @@ DEFAULT_TEXT = os.environ.get("DEFAULT_TEXT", "")  # used to avoid NOT NULL fail
 
 def _headers(prefer: str) -> Dict[str, str]:
     return {
-        "apikey": SUPABASE_SERVICE_ROLE_KEY,
-        "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+        "apikey": SUPABASE_SECRET_KEY,
+        "Authorization": f"Bearer {SUPABASE_SECRET_KEY}",
         "Content-Type": "application/json",
         "Accept": "application/json",
         "Prefer": prefer,

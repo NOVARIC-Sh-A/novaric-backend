@@ -25,10 +25,10 @@ def get_supabase_admin() -> "SupabaseClient":
         return _supabase_admin
 
     url = (os.getenv("SUPABASE_URL") or "").strip()
-    key = (os.getenv("SUPABASE_SERVICE_ROLE_KEY") or "").strip()
+    key = (os.getenv("SUPABASE_SECRET_KEY") or "").strip()
 
     if not url or not key:
-        raise RuntimeError("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY")
+        raise RuntimeError("Missing SUPABASE_URL or SUPABASE_SECRET_KEY")
 
     try:
         # Import here to avoid import-time failures breaking server startup

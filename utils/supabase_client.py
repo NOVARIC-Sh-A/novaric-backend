@@ -63,7 +63,13 @@ SUPABASE_ANON_KEY: str = _env_first(
 )
 
 # Prefer SERVICE ROLE key for server-side writes
-SUPABASE_KEY: str = SUPABASE_SERVICE_ROLE_KEY or SUPABASE_ANON_KEY
+SUPABASE_KEY: str = SUPABASE_ANON_KEY or SUPABASE_SERVICE_ROLE_KEY
+
+# NEW:
+# - READ key: prefer anon if available (least privilege); otherwise fall back to service role
+# - ADMIN key: service role ONLY (hard requirement for writes)
+SUPABASE_READ_KEY: str = SUPABASE_ANON_KEY or SUPABASE_SERVICE_ROLE_KEY
+SUPABASE_ADMIN_KEY: str = SUPABASE_SERVICE_ROLE_KEY
 
 # ----------------------------------------------------
 # Supabase URL sanity checks (prevents "YOUR_SUPABASE_URL" failures)
@@ -138,7 +144,7 @@ def is_supabase_configured() -> bool:
     """
     True only when URL is valid and at least one key is present.
     """
-    return bool(SUPABASE_URL and SUPABASE_KEY)
+    return bool(SUPABASE_URL and (SUPABASE_READ_KEY or SUPABASE_ADMIN_KEY))
 
 
 def _ensure_config() -> None:
@@ -147,7 +153,7 @@ def _ensure_config() -> None:
             "SUPABASE_URL is missing or invalid. "
             "Set SUPABASE_URL to something like: https://<project-ref>.supabase.co"
         )
-    if not SUPABASE_KEY:
+    if not (SUPABASE_READ_KEY or SUPABASE_ADMIN_KEY):
         raise RuntimeError(
             "No Supabase API key found. Set SUPABASE_SERVICE_ROLE_KEY (recommended) "
             "or SUPABASE_ANON_KEY."
@@ -160,7 +166,7 @@ def _rest_url() -> str:
     return f"{SUPABASE_URL}/rest/v1"
 
 
-def _headers(*, prefer: Optional[str] = None) -> Dict[str, str]:
+def _headers(*, prefer: Optional[str] = None, key: Optional[str] = None) -> Dict[str, str]:
     _ensure_config()
 
     # Supabase supports both:
@@ -168,7 +174,10 @@ def _headers(*, prefer: Optional[str] = None) -> Dict[str, str]:
     # - New API keys: "sb_publishable_..." / "sb_secret_..."
     #
     # PostgREST expects apikey and Authorization Bearer.
-    key = SUPABASE_KEY
+    key = (key or SUPABASE_READ_KEY or "").strip()
+
+    if not key:
+        raise RuntimeError("Supabase key missing for this operation.")
 
     h: Dict[str, str] = {
         "apikey": key,
@@ -222,7 +231,7 @@ def _normalize_list(data: Any) -> List[Dict[str, Any]]:
 # ----------------------------------------------------
 def _get(path: str, params: Dict[str, Any]) -> List[Dict[str, Any]]:
     url = f"{_rest_url()}/{path.lstrip('/')}"
-    resp = _session.get(url, headers=_headers(), params=params, timeout=20)
+    resp = _session.get(url, headers=_headers(key=SUPABASE_READ_KEY), params=params, timeout=20)
 
     if resp.status_code == 401:
         raise RuntimeError("Unauthorized: Invalid Supabase API key (check service role key).")
@@ -237,10 +246,13 @@ def _get(path: str, params: Dict[str, Any]) -> List[Dict[str, Any]]:
 # PATCH helper (used for manual upsert fallback)
 # ----------------------------------------------------
 def _patch(table: str, where_params: Dict[str, str], payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    if not SUPABASE_ADMIN_KEY:
+        raise RuntimeError("Unauthorized: SERVICE_ROLE_KEY invalid or missing.")
+
     url = f"{_rest_url()}/{table}"
     resp = _session.patch(
         url,
-        headers=_headers(prefer="return=representation"),
+        headers=_headers(prefer="return=representation", key=SUPABASE_ADMIN_KEY),
         params=where_params,
         json=payload,
         timeout=20,
@@ -262,10 +274,13 @@ def supabase_insert(table: str, records: List[Dict[str, Any]]) -> Any:
     if not isinstance(records, list) or len(records) == 0:
         raise ValueError("supabase_insert: 'records' must be a non-empty list")
 
+    if not SUPABASE_ADMIN_KEY:
+        raise RuntimeError("Unauthorized: SERVICE_ROLE_KEY invalid or missing.")
+
     url = f"{_rest_url()}/{table}"
     resp = _session.post(
         url,
-        headers=_headers(prefer="return=representation"),
+        headers=_headers(prefer="return=representation", key=SUPABASE_ADMIN_KEY),
         json=records,
         timeout=20,
     )
@@ -306,9 +321,12 @@ def supabase_upsert(
     if not isinstance(records, list) or len(records) == 0:
         raise ValueError("supabase_upsert: 'records' must be a non-empty list")
 
+    if not SUPABASE_ADMIN_KEY:
+        raise RuntimeError("Unauthorized: SERVICE_ROLE_KEY invalid or missing.")
+
     url = f"{_rest_url()}/{table}"
     params = {"on_conflict": conflict_col}
-    headers = _headers(prefer="resolution=merge-duplicates,return=representation")
+    headers = _headers(prefer="resolution=merge-duplicates,return=representation", key=SUPABASE_ADMIN_KEY)
 
     resp = _session.post(url, headers=headers, params=params, json=records, timeout=20)
 
@@ -461,6 +479,16 @@ class _RestSupabase:
 SUPABASE_CLIENT_INIT_ERROR: Optional[str] = None
 
 
+def _is_jwt_like(key: str) -> bool:
+    """
+    Legacy Supabase keys are JWT-like (three dot-separated parts).
+    New sb_secret/sb_publishable keys are NOT JWT-like and may break supabase-py
+    depending on the installed version.
+    """
+    k = (key or "").strip()
+    return k.count(".") == 2
+
+
 def _create_supabase_py_client():
     """
     Try to create supabase-py client. Never raises.
@@ -471,6 +499,11 @@ def _create_supabase_py_client():
 
     if not (SUPABASE_URL and SUPABASE_KEY):
         SUPABASE_CLIENT_INIT_ERROR = "SUPABASE_URL or SUPABASE_KEY missing/invalid"
+        return None
+
+    # Avoid noisy failures when using new non-JWT keys (sb_secret_/sb_publishable_)
+    if not _is_jwt_like(SUPABASE_KEY):
+        SUPABASE_CLIENT_INIT_ERROR = "create_client skipped: key is not JWT-like (likely sb_secret/sb_publishable)"
         return None
 
     try:

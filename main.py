@@ -65,6 +65,7 @@ paragon_router = None
 enrichment_router = None
 politicians_router = None
 seo_router = None  # ✅ added
+forensic_router = None  # ✅ forensic
 
 try:
     from paragon_api import router as paragon_router  # type: ignore  # noqa: E402
@@ -90,6 +91,13 @@ try:
     logger.info("SEO router loaded")
 except Exception as e:
     logger.exception("Failed to load SEO router (startup continues): %s", e)
+
+# ✅ Forensic router guarded import (startup-safe)
+try:
+    from routers.forensic import router as forensic_router  # type: ignore  # noqa: E402
+    logger.info("Forensic router loaded")
+except Exception as e:
+    logger.exception("Failed to load forensic router (startup continues): %s", e)
 
 # ================================================================
 # FEED REGISTRY
@@ -1012,6 +1020,9 @@ if enrichment_router:
 
 if politicians_router:
     _mount_router_twice(politicians_router, name="POLITICIANS")
+
+if forensic_router:
+    _mount_router_twice(forensic_router, name="FORENSIC")
 
 # ✅ SEO must be mounted at ROOT for crawlers:
 #    /sitemap.xml and /rss.xml

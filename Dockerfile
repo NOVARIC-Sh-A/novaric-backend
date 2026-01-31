@@ -46,4 +46,4 @@ USER appuser
 EXPOSE 8080
 
 # API entrypoint (Cloud Run Service)
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]
+CMD ["python3", "-m", "uvicorn", "runner_http:app", "--host", "0.0.0.0", "--port", "8080"]

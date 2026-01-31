@@ -251,25 +251,25 @@ def __supabase():
     try:
         from utils.supabase_client import (  # noqa: WPS433 (runtime import intended)
             SUPABASE_URL,
-            SUPABASE_SECRET_KEY,
-            SUPABASE_PUBLISHABLE_KEY,
+            SUPABASE_SERVICE_ROLE_KEY,
+            SUPABASE_ANON_KEY,
             supabase,
             is_supabase_configured,
             SUPABASE_CLIENT_INIT_ERROR,
         )
 
         key_in_use = "none"
-        if SUPABASE_SECRET_KEY:
+        if SUPABASE_SERVICE_ROLE_KEY:
             key_in_use = "secret"
-        elif SUPABASE_PUBLISHABLE_KEY:
+        elif SUPABASE_ANON_KEY:
             key_in_use = "publishable"
 
         return {
             "configured": bool(is_supabase_configured()),
             "url_set": bool(SUPABASE_URL),
             "url_preview": (SUPABASE_URL[:45] + "...") if SUPABASE_URL else "",
-            "service_role_set": bool(SUPABASE_SECRET_KEY),  # keep legacy field name for clients
-            "anon_set": bool(SUPABASE_PUBLISHABLE_KEY),      # keep legacy field name for clients
+            "service_role_set": bool(SUPABASE_SERVICE_ROLE_KEY),  # keep legacy field name for clients
+            "anon_set": bool(SUPABASE_ANON_KEY),      # keep legacy field name for clients
             "key_in_use": key_in_use,
             "client_created": bool(supabase),
             "client_init_error": SUPABASE_CLIENT_INIT_ERROR,
@@ -278,8 +278,8 @@ def __supabase():
         return {
             "configured": False,
             "url_set": bool(os.getenv("SUPABASE_URL")),
-            "service_role_set": bool(os.getenv("SUPABASE_SECRET_KEY")),
-            "anon_set": bool(os.getenv("SUPABASE_PUBLISHABLE_KEY")),
+            "service_role_set": bool(os.getenv("SUPABASE_SERVICE_ROLE_KEY")),
+            "anon_set": bool(os.getenv("SUPABASE_ANON_KEY")),
             "key_in_use": "none",
             "client_created": False,
             "client_init_error": f"diag_import_failed: {e}",
@@ -293,24 +293,24 @@ def supabase_diag():
     try:
         from utils.supabase_client import (  # type: ignore
             SUPABASE_URL,
-            SUPABASE_SECRET_KEY,
-            SUPABASE_PUBLISHABLE_KEY,
+            SUPABASE_SERVICE_ROLE_KEY,
+            SUPABASE_ANON_KEY,
             is_supabase_configured,
             supabase,
         )
 
         key_in_use = "none"
-        if SUPABASE_SECRET_KEY:
+        if SUPABASE_SERVICE_ROLE_KEY:
             key_in_use = "secret"
-        elif SUPABASE_PUBLISHABLE_KEY:
+        elif SUPABASE_ANON_KEY:
             key_in_use = "publishable"
 
         return {
             "configured": bool(is_supabase_configured()),
             "url_set": bool(SUPABASE_URL),
             "url_preview": (SUPABASE_URL[:45] + "...") if SUPABASE_URL else "",
-            "service_role_set": bool(SUPABASE_SECRET_KEY),
-            "anon_set": bool(SUPABASE_PUBLISHABLE_KEY),
+            "service_role_set": bool(SUPABASE_SERVICE_ROLE_KEY),
+            "anon_set": bool(SUPABASE_ANON_KEY),
             "key_in_use": key_in_use if key_in_use != "none" else "missing",
             "client_created": bool(supabase is not None),
         }
@@ -327,8 +327,8 @@ def __supabase_ping():
     try:
         from utils.supabase_client import (  # noqa: WPS433
             SUPABASE_URL,
-            SUPABASE_SECRET_KEY,
-            SUPABASE_PUBLISHABLE_KEY,
+            SUPABASE_SERVICE_ROLE_KEY,
+            SUPABASE_ANON_KEY,
             supabase,
             is_supabase_configured,
         )
@@ -338,8 +338,8 @@ def __supabase_ping():
     info = {
         "configured": bool(is_supabase_configured()),
         "url_preview": (SUPABASE_URL[:45] + "...") if SUPABASE_URL else "",
-        "service_role_set": bool(SUPABASE_SECRET_KEY),
-        "anon_set": bool(SUPABASE_PUBLISHABLE_KEY),
+        "service_role_set": bool(SUPABASE_SERVICE_ROLE_KEY),
+        "anon_set": bool(SUPABASE_ANON_KEY),
         "client_created": bool(supabase),
     }
 
@@ -1208,9 +1208,9 @@ def startup_event():
     logger.info("NOVARIC Backend started successfully.")
     try:
         supabase_url_set = bool(os.getenv("SUPABASE_URL"))
-        supabase_secret_set = bool(os.getenv("SUPABASE_SECRET_KEY"))
+        supabase_secret_set = bool(os.getenv("SUPABASE_SERVICE_ROLE_KEY"))
         logger.info(
-            "ENV: SUPABASE_URL set=%s | SUPABASE_SECRET_KEY set=%s",
+            "ENV: SUPABASE_URL set=%s | SUPABASE_SERVICE_ROLE_KEY set=%s",
             supabase_url_set,
             supabase_secret_set,
         )

@@ -38,7 +38,7 @@ def get_supabase_admin() -> "SupabaseClient":
         raise RuntimeError("Supabase client module unavailable") from e
 
     if not SUPABASE_URL or not SUPABASE_ADMIN_KEY:
-        raise RuntimeError("Missing SUPABASE_URL or SUPABASE_SECRET_KEY")
+        raise RuntimeError("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY")
 
     try:
         # Import lazily (Cloud Run safe)

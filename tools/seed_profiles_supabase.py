@@ -5,7 +5,7 @@ Seed / upsert PROFILES from mock_profiles.py into Supabase public.profiles.
 Windows-friendly, “plug & play”:
   1) From backend root (where mock_profiles.py lives), run:
      PS> $env:SUPABASE_URL="https://xxxx.supabase.co"
-     PS> $env:SUPABASE_SECRET_KEY="YOUR_SERVICE_ROLE_KEY"
+     PS> $env:SUPABASE_SERVICE_ROLE_KEY="YOUR_SERVICE_ROLE_KEY"
      PS> python tools/seed_profiles_supabase.py
 
 Notes:
@@ -49,14 +49,14 @@ from mock_profiles import PROFILES  # noqa: E402
 def get_supabase() -> Client:
     url = os.getenv("SUPABASE_URL", "").strip()
     key = (
-        os.getenv("SUPABASE_SECRET_KEY", "").strip()
+        os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
         or os.getenv("SUPABASE_KEY", "").strip()
-        or os.getenv("SUPABASE_PUBLISHABLE_KEY", "").strip()
+        or os.getenv("SUPABASE_ANON_KEY", "").strip()
     )
 
     if not url or not key:
         raise RuntimeError(
-            "Missing SUPABASE_URL and SUPABASE_SECRET_KEY (recommended) in environment."
+            "Missing SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY (recommended) in environment."
         )
 
     return create_client(url, key)

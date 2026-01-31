@@ -13,12 +13,12 @@ def load_supabase_env() -> SupabaseEnv:
     url = os.getenv("SUPABASE_URL") or os.getenv("SUPABASE_PROJECT_URL")
 
     publishable_key = (
-        os.getenv("SUPABASE_PUBLISHABLE_KEY")
+        os.getenv("SUPABASE_ANON_KEY")
         or os.getenv("SUPABASE_ANON_KEY")  # legacy fallback
     )
 
     secret_key = (
-        os.getenv("SUPABASE_SECRET_KEY")
+        os.getenv("SUPABASE_SERVICE_ROLE_KEY")
         or os.getenv("SUPABASE_SERVICE_ROLE_KEY")  # legacy fallback
     )
 

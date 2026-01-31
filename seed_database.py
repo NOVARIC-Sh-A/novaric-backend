@@ -8,7 +8,7 @@ from mock_profiles import PROFILES
 # 1. Setup
 load_dotenv()
 url = os.environ.get("SUPABASE_URL")
-key = os.environ.get("SUPABASE_SECRET_KEY")
+key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
 
 if not url or not key:
     print("❌ Error: Missing Supabase credentials in .env")

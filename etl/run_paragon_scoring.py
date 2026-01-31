@@ -1,5 +1,3 @@
-# etl/run_paragon_scoring.py
-
 from __future__ import annotations
 
 import argparse
@@ -264,3 +262,64 @@ if __name__ == "__main__":
         offset=args.offset,
         batch_size=args.batch_size,
     )
+
+
+# ---------------------------------------------------------------------
+# NEW: API-friendly helper (optional import)
+# NOTE: This does NOT change ETL behavior; it just provides a shared
+#       mapping utility to hydrate VipProfileResponse from paragon_scores.
+# ---------------------------------------------------------------------
+def paragon_scores_row_to_vip_fields(paragon_scores_row: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Convert a paragon_scores DB row into VipProfileResponse-compatible fields:
+      - paragon_score
+      - paragon_analysis
+      - last_sync_at
+      - sync_status
+
+    Expected paragon_scores_row keys:
+      - overall_score
+      - dimension_scores (preferred) or dimensions_json (fallback)
+      - calculated_at (preferred) or last_updated (fallback)
+    """
+    if not paragon_scores_row or not isinstance(paragon_scores_row, dict):
+        return {
+            "paragon_score": 0,
+            "paragon_analysis": [],
+            "last_sync_at": None,
+            "sync_status": "idle",
+        }
+
+    overall = paragon_scores_row.get("overall_score", 0) or 0
+    try:
+        overall_int = int(overall)
+    except Exception:
+        overall_int = 0
+
+    dims = paragon_scores_row.get("dimension_scores")
+    if not dims:
+        dims = paragon_scores_row.get("dimensions_json") or []
+
+    paragon_analysis: List[Dict[str, Any]] = []
+    if isinstance(dims, list):
+        for item in dims:
+            if not isinstance(item, dict):
+                continue
+            dim = item.get("dimension")
+            score = item.get("score")
+            if not isinstance(dim, str):
+                continue
+            try:
+                score_int = int(score)
+            except Exception:
+                score_int = 0
+            paragon_analysis.append({"dimension": dim, "score": score_int})
+
+    last_sync_at = paragon_scores_row.get("calculated_at") or paragon_scores_row.get("last_updated")
+
+    return {
+        "paragon_score": max(0, min(100, overall_int)),
+        "paragon_analysis": paragon_analysis,
+        "last_sync_at": last_sync_at,
+        "sync_status": "idle",
+    }

@@ -1,4 +1,3 @@
-# schemas.py
 from __future__ import annotations
 
 from pydantic import BaseModel, Field
@@ -37,6 +36,14 @@ class ChecklistItem(BaseModel):
     academic_ref: str
     is_completed: bool
     priority: str
+
+
+# ============================================================
+# PARAGON MODEL (NEW)
+# ============================================================
+class ParagonDimension(BaseModel):
+    dimension: str
+    score: int
 
 
 # ============================================================
@@ -117,6 +124,18 @@ class VipProfileResponse(BaseModel):
         default_factory=list,
         description="AI-generated improvement recommendations for the profile.",
     )
+
+    # ----------------------------------------
+    # PARAGON (NEW: STRUCTURED OUTPUT FOR UI)
+    # ----------------------------------------
+    paragon_score: int = 0
+    paragon_analysis: List[ParagonDimension] = Field(default_factory=list)
+
+    # ----------------------------------------
+    # "LIVE" METADATA (NEW)
+    # ----------------------------------------
+    last_sync_at: Optional[str] = None
+    sync_status: str = "idle"  # "idle" | "scraping" | "calculating"
 
 
 # ============================================================

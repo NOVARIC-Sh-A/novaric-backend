@@ -36,8 +36,8 @@ def write_trend_history(paragon_records: List[Dict[str, Any]]) -> None:
     # --------------------------------------------------------
     previous_map: Dict[int, int] = {}
     try:
-        previous_rows = fetch_table("paragon_scores", select="politician_id, overall_score")
-        for row in previous_rows or []:
+        previous_rows = fetch_table("paragon_scores", select="politician_id, overall_score") or []
+        for row in previous_rows:
             try:
                 pid = int(row["politician_id"])
                 score = int(row["overall_score"])
@@ -70,8 +70,8 @@ def write_trend_history(paragon_records: List[Dict[str, Any]]) -> None:
                 "previous_score": previous_score,
                 "new_score": new_score,
                 "delta": delta,
-                "raw_snapshot": r,          # full JSON snapshot
-                "calculated_at": now_iso,   # ✅ DO NOT use "now()"
+                "raw_snapshot": r,        # full JSON snapshot
+                "calculated_at": now_iso, # ✅ real timestamp (NOT "now()")
             }
         )
 
@@ -86,7 +86,7 @@ def write_trend_history(paragon_records: List[Dict[str, Any]]) -> None:
         supabase_insert("paragon_trends", history_rows)
         print(f"[Trend] ✅ Inserted {len(history_rows)} trend rows.")
     except Exception as e:
-        print(f"[Trend] ❌ Insert failed: {e}")
+        print(f"[Trend] ❌ Trend insert failed: {e}")
 
 
 # ============================================================
@@ -155,7 +155,7 @@ async def run_etl() -> None:
 
 
 # ------------------------------------------------------------
-# CLI entrypoint (optional; safe to keep)
+# Entry (optional for local runs)
 # ------------------------------------------------------------
 if __name__ == "__main__":
     asyncio.run(run_etl())

@@ -1,5 +1,5 @@
 # ============================
-# 1) Base builder image
+# 1) Builder stage
 # ============================
 FROM python:3.11-slim AS builder
 
@@ -10,46 +10,40 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Install all Python dependencies into /install
-COPY requirements.txt requirements.txt
+COPY requirements.txt .
 
-RUN pip install --prefix=/install --no-cache-dir -r requirements.txt
-
+RUN python -m pip install --upgrade pip --no-cache-dir --disable-pip-version-check \
+    && pip install --prefix=/install --no-cache-dir -r requirements.txt
 
 
 # ============================
-# 2) Final runtime image
+# 2) Runtime stage
 # ============================
 FROM python:3.11-slim
 
-# Cloud Run expects the app to listen on $PORT
 ENV PORT=8080
 ENV PYTHONUNBUFFERED=1
+ENV PYTHONPATH=/app
+ENV HOME=/home/appuser
 
-# Ensures absolute imports work (e.g., "import utils.x")
-# ALSO ensure installed site-packages are importable at runtime
-ENV PYTHONPATH="/home/appuser/.local/lib/python3.11/site-packages:/app"
-
-# Create non-root user (Cloud Run best practice)
 RUN useradd -m appuser
-
-# Prepare app directory and ensure expected static dir exists
-# (prevents StaticFiles(directory="static") from crashing if static isn't present)
-RUN mkdir -p /app/static && chown -R appuser:appuser /app
-
-USER appuser
 
 WORKDIR /app
 
-# Add site-packages from builder stage
+# Copy installed dependencies from builder into appuser local site-packages
 COPY --from=builder /install /home/appuser/.local/
 ENV PATH="/home/appuser/.local/bin:${PATH}"
 
-# Copy the entire backend source code
-COPY --chown=appuser:appuser . /app
+# Copy application source
+COPY . /app
 
-# Expose the port FastAPI will run on
+# Ensure static exists and permissions are correct
+RUN mkdir -p /app/static \
+    && chown -R appuser:appuser /app
+
+USER appuser
+
 EXPOSE 8080
 
-# Start application via Uvicorn (bind to Cloud Run PORT)
-CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT}"]
+# API entrypoint (Cloud Run Service)
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]

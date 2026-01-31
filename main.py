@@ -10,6 +10,7 @@ import sys
 import time
 import logging
 import re
+import threading  # ✅ added (Cloud Run-safe background jobs)
 from typing import List, Dict, Optional, Literal
 from urllib.parse import urlparse
 from datetime import datetime, timezone
@@ -23,6 +24,98 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.responses import Response, JSONResponse
 from pydantic import BaseModel
+
+# ================================================================
+# CLOUD RUN: BACKGROUND WORK GATING (DO NOT BLOCK STARTUP PROBE)
+# ================================================================
+# ✅ Cloud Run requires the container to accept TCP on $PORT quickly.
+# ✅ Heavy scrapers must never block app startup readiness.
+ENABLE_SCRAPERS = (os.getenv("ENABLE_SCRAPERS", "false").strip().lower() == "true")
+
+# Signal for any modules that might start scrapers at import time.
+# If those modules read this env var, they can skip auto-starting.
+# Harmless if unused.
+if not ENABLE_SCRAPERS:
+    os.environ.setdefault("NOVARIC_DISABLE_SCRAPERS_ON_IMPORT", "1")
+
+
+def _call_optional(callable_path: str) -> bool:
+    """
+    Best-effort dynamic runner.
+    callable_path examples:
+      - "services.scraper_runner:start"
+      - "services.scraper_runner:start_scrapers"
+      - "tasks.worker:run"
+    Returns True if a callable was found and invoked.
+    """
+    try:
+        if ":" not in callable_path:
+            return False
+        mod_name, fn_name = callable_path.split(":", 1)
+        if not mod_name or not fn_name:
+            return False
+
+        module = __import__(mod_name, fromlist=[fn_name])
+        fn = getattr(module, fn_name, None)
+        if callable(fn):
+            fn()
+            return True
+        return False
+    except Exception:
+        return False
+
+
+def _run_background_jobs_safely(logger_obj: logging.Logger) -> None:
+    """
+    Runs background jobs without impacting Cloud Run readiness.
+    This MUST NOT raise (daemon thread).
+    """
+    try:
+        if not ENABLE_SCRAPERS:
+            logger_obj.info("Scrapers are disabled (ENABLE_SCRAPERS=false).")
+            return
+
+        logger_obj.info("Scrapers enabled. Starting background jobs in daemon thread...")
+
+        # ✅ Allow explicit entrypoint override (cleanest)
+        # Example:
+        #   SCRAPER_ENTRYPOINT="services.scraper_runner:start"
+        entry = (os.getenv("SCRAPER_ENTRYPOINT") or "").strip()
+        if entry:
+            ok = _call_optional(entry)
+            logger_obj.info("SCRAPER_ENTRYPOINT=%s | started=%s", entry, ok)
+            if ok:
+                return
+            logger_obj.warning("SCRAPER_ENTRYPOINT was set but could not be invoked: %s", entry)
+
+        # ✅ Known/likely fallbacks (best-effort; safe if not present)
+        # Add your real runner module here if you have one.
+        candidates = [
+            "services.scraper_runner:start",
+            "services.scraper_runner:start_scrapers",
+            "services.media_scraper:start",
+            "services.social_scraper:start",
+            "tasks.scraper:run",
+            "tasks.worker:run",
+            "worker:main",
+        ]
+
+        any_started = False
+        for c in candidates:
+            ok = _call_optional(c)
+            if ok:
+                logger_obj.info("Started background job via %s", c)
+                any_started = True
+
+        if not any_started:
+            logger_obj.info(
+                "No background scraper entrypoints were started. "
+                "If you have a runner, set SCRAPER_ENTRYPOINT=module:function."
+            )
+
+    except Exception as e:
+        logger_obj.exception("Background jobs failed (non-fatal): %s", e)
+
 
 # ================================================================
 # STDOUT/STDERR FLUSH (CLOUD RUN FRIENDLY)
@@ -1125,6 +1218,19 @@ def startup_event():
         logger.info("ENV: PUBLIC_BASE_URL=%s", (os.getenv("PUBLIC_BASE_URL") or "").strip() or "(not set)")
     except Exception:
         pass
+
+    # ✅ Cloud Run: start background scrapers AFTER startup (non-blocking)
+    try:
+        t = threading.Thread(
+            target=_run_background_jobs_safely,
+            args=(logger,),
+            daemon=True,
+            name="novaric-background-jobs",
+        )
+        t.start()
+        logger.info("Background job thread started (daemon=%s)", True)
+    except Exception as e:
+        logger.exception("Failed to start background job thread (non-fatal): %s", e)
 
 
 @app.on_event("shutdown")

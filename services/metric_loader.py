@@ -1,72 +1,114 @@
 # services/metric_loader.py
 
-from utils.supabase_client import _get
-from etl.media_scraper import scrape_media_signals   # if exists
-from etl.social_scraper import scrape_social_signals # if exists
+from __future__ import annotations
 
-def load_metrics_for(politician_id: int) -> dict:
+import os
+from typing import Dict, Any
+
+from utils.supabase_client import _get
+
+
+# -----------------------------------------------------------
+# Runtime flags (Cloud Run)
+# -----------------------------------------------------------
+TEST_MODE = os.getenv("TEST_MODE", "false").lower() == "true"
+SAFE_MODE_ENV = os.getenv("PARAGON_SAFE_MODE", "false").lower() == "true"
+ENABLE_SCRAPERS = os.getenv("ENABLE_SCRAPERS", "false").lower() == "true"
+
+
+# -----------------------------------------------------------
+# Lazy imports (avoid importing scrapers at startup)
+# -----------------------------------------------------------
+def _lazy_media_scraper():
+    from etl.media_scraper import scrape_media_signals
+    return scrape_media_signals
+
+
+def _lazy_social_scraper():
+    from etl.social_scraper import scrape_social_signals
+    return scrape_social_signals
+
+
+def load_metrics_for(
+    politician_id: int,
+    *,
+    safe_mode: bool = False,
+) -> Dict[str, Any]:
     """
     Loads all metrics needed for PARAGON scoring.
-    Combines:
-        - Supabase live metrics (base structured data)
-        - Real-time scraper signals (enrichment)
+
+    SAFE MODE:
+      - Supabase structured metrics only
+      - scrapers disabled
     """
 
     # -----------------------------------------------------------
     # 1) Load base structured metrics from Supabase
     # -----------------------------------------------------------
+    defaults = {
+        "scandals_flagged": 0,
+        "wealth_declaration_issues": 0,
+        "public_projects_completed": 0,
+        "parliamentary_attendance": 0,
+        "international_meetings": 0,
+        "party_control_index": 0,
+        "media_mentions_monthly": 0,
+        "legislative_initiatives": 0,
+        "independence_index": 0,
+    }
+
+    if TEST_MODE:
+        return defaults.copy()
+
     try:
         rows = _get(
             "paragon_metrics",
-            {
-                "select": "*",
-                "politician_id": f"eq.{politician_id}",
-                "limit": 1
-            }
+            {"select": "*", "politician_id": f"eq.{politician_id}", "limit": 1},
         )
         base = rows[0] if rows else {}
     except Exception as e:
-        print(f"[metric_loader] Error fetching base metrics: {e}")
+        print(f"[services.metric_loader] Error fetching base metrics: {e}")
         base = {}
 
-    # Base metrics should exist, but if they don't, create defaults:
-    metrics = {
-        "scandals_flagged": base.get("scandals_flagged", 0),
-        "wealth_declaration_issues": base.get("wealth_declaration_issues", 0),
-        "public_projects_completed": base.get("public_projects_completed", 0),
-        "parliamentary_attendance": base.get("parliamentary_attendance", 0),
-        "international_meetings": base.get("international_meetings", 0),
-        "party_control_index": base.get("party_control_index", 0),
-        "media_mentions_monthly": base.get("media_mentions_monthly", 0),
-        "legislative_initiatives": base.get("legislative_initiatives", 0),
-        "independence_index": base.get("independence_index", 0),
-    }
+    metrics: Dict[str, Any] = {k: base.get(k, v) for k, v in defaults.items()}
 
     # -----------------------------------------------------------
-    # 2) Enrichment: Media Scraper → sentiment, mentions, stories
+    # HARD STOP: never run scrapers unless explicitly enabled
+    # -----------------------------------------------------------
+    if safe_mode or SAFE_MODE_ENV or (not ENABLE_SCRAPERS):
+        # Keep values stable and predictable when scrapers disabled
+        return {k: (max(0, v) if isinstance(v, (int, float)) else v) for k, v in metrics.items()}
+
+    # -----------------------------------------------------------
+    # 2) Enrichment: Media Scraper
     # -----------------------------------------------------------
     try:
+        scrape_media_signals = _lazy_media_scraper()
         media_data = scrape_media_signals(politician_id)
-        metrics["media_mentions_monthly"] += media_data.get("mentions", 0)
-        metrics["scandals_flagged"] += media_data.get("scandals_flagged", 0)
-        metrics["parliamentary_attendance"] += media_data.get("attendance_signal", 0)
-        # Add more as needed
+
+        metrics["media_mentions_monthly"] += int(media_data.get("mentions", 0) or 0)
+        metrics["scandals_flagged"] += int(media_data.get("scandals_flagged", 0) or 0)
+        metrics["parliamentary_attendance"] += int(media_data.get("attendance_signal", 0) or 0)
+
     except Exception as e:
-        print(f"[metric_loader] Media scraper failed: {e}")
+        print(f"[services.metric_loader] Media scraper failed: {e}")
 
     # -----------------------------------------------------------
-    # 3) Enrichment: Social Signals → virality, influence boost
+    # 3) Enrichment: Social Signals
     # -----------------------------------------------------------
     try:
+        scrape_social_signals = _lazy_social_scraper()
         social_data = scrape_social_signals(politician_id)
-        metrics["party_control_index"] += social_data.get("influence_boost", 0)
+
+        metrics["party_control_index"] += float(social_data.get("influence_boost", 0) or 0)
+
     except Exception as e:
-        print(f"[metric_loader] Social scraper failed: {e}")
+        print(f"[services.metric_loader] Social scraper failed: {e}")
 
     # -----------------------------------------------------------
-    # 4) Clamp values within reasonable boundaries
+    # 4) Clamp numeric values
     # -----------------------------------------------------------
-    for key, value in metrics.items():
+    for key, value in list(metrics.items()):
         if isinstance(value, (int, float)):
             metrics[key] = max(0, value)
 

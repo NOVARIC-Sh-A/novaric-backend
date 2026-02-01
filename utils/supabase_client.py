@@ -23,6 +23,12 @@ NEW (required for your current production key format sb_secret_* / sb_publishabl
 - Split keys:
   - SUPABASE_READ_KEY  (prefer anon)
   - SUPABASE_ADMIN_KEY (service role only; required for writes/storage)
+
+CRITICAL FIX:
+- Do NOT send "Authorization: Bearer <sb_secret_*>" or "Bearer <sb_publishable_*>"
+  because those are NOT JWTs and will produce "JWT failed verification".
+  For sb_* keys, we send only "apikey".
+  For legacy JWT-like keys (three dot-separated segments), we send both apikey and Authorization.
 """
 
 from __future__ import annotations
@@ -45,9 +51,6 @@ except Exception:
 # ----------------------------------------------------
 # Environment configuration
 # ----------------------------------------------------
-# NOTE:
-# We keep the original env names, but also tolerate common misconfigurations
-# (e.g. truncated variable name in Cloud Run: SUPABASE_SERVICE_ROLE_KE).
 def _env_first(*names: str) -> str:
     for n in names:
         v = (os.getenv(n) or "").strip()
@@ -61,15 +64,15 @@ SUPABASE_URL: str = _env_first("SUPABASE_URL")
 # service role key can be misnamed in some deployments; tolerate safely
 SUPABASE_SERVICE_ROLE_KEY: str = _env_first(
     "SUPABASE_SERVICE_ROLE_KEY",
-    "SUPABASE_SERVICE_ROLE_KEY",  # legacy name
-    "SUPABASE_SERVICE_ROLE_KE",  # common truncation typo
-    "SUPABASE_SERVICE_KEY",  # occasional alternative naming
+    "SUPABASE_SERVICE_ROLE_KEY",  # legacy name (kept for compatibility)
+    "SUPABASE_SERVICE_ROLE_KE",   # common truncation typo
+    "SUPABASE_SERVICE_KEY",       # occasional alternative naming
 )
 
 SUPABASE_ANON_KEY: str = _env_first(
     "SUPABASE_ANON_KEY",
-    "SUPABASE_ANON_KEY",  # legacy name
-    "SUPABASE_KEY",  # some stacks export anon as SUPABASE_KEY
+    "SUPABASE_ANON_KEY",  # legacy name (kept for compatibility)
+    "SUPABASE_KEY",       # some stacks export anon as SUPABASE_KEY
 )
 
 # NEW:
@@ -79,11 +82,11 @@ SUPABASE_READ_KEY: str = SUPABASE_ANON_KEY or SUPABASE_SERVICE_ROLE_KEY
 SUPABASE_ADMIN_KEY: str = SUPABASE_SERVICE_ROLE_KEY
 
 # Back-compat (some call-sites expect SUPABASE_KEY)
-# We point SUPABASE_KEY to READ key (least privilege by default).
 SUPABASE_KEY: str = SUPABASE_READ_KEY
 
+
 # ----------------------------------------------------
-# Supabase URL sanity checks (prevents "YOUR_SUPABASE_URL" failures)
+# Supabase URL sanity checks
 # ----------------------------------------------------
 def _looks_like_placeholder(url: str) -> bool:
     u = (url or "").strip().lower()
@@ -116,12 +119,10 @@ def _validate_supabase_url(url: str) -> str:
     if _looks_like_placeholder(u):
         return ""
     if not _has_scheme(u):
-        # treat as invalid (avoid requests "No scheme supplied")
         return ""
     return u.rstrip("/")
 
 
-# Normalize once
 SUPABASE_URL = _validate_supabase_url(SUPABASE_URL)
 
 # ----------------------------------------------------
@@ -129,7 +130,6 @@ SUPABASE_URL = _validate_supabase_url(SUPABASE_URL)
 # ----------------------------------------------------
 _session = requests.Session()
 
-# Optional: slightly more resilient networking without changing call-sites.
 try:
     from requests.adapters import HTTPAdapter
     from urllib3.util.retry import Retry
@@ -147,14 +147,10 @@ try:
     _session.mount("https://", _adapter)
     _session.mount("http://", _adapter)
 except Exception:
-    # If urllib3 Retry is unavailable for any reason, continue without retries.
     pass
 
 
 def is_supabase_configured() -> bool:
-    """
-    True only when URL is valid and at least one key is present.
-    """
     return bool(SUPABASE_URL and (SUPABASE_READ_KEY or SUPABASE_ADMIN_KEY))
 
 
@@ -173,7 +169,6 @@ def _ensure_config() -> None:
 
 def _rest_url() -> str:
     _ensure_config()
-    # SUPABASE_URL is already rstrip("/") in _validate_supabase_url
     return f"{SUPABASE_URL}/rest/v1"
 
 
@@ -182,30 +177,45 @@ def _storage_url() -> str:
     return f"{SUPABASE_URL}/storage/v1"
 
 
-def _headers(*, prefer: Optional[str] = None, key: Optional[str] = None, content_type: Optional[str] = None) -> Dict[str, str]:
+def _is_jwt_like(key: str) -> bool:
+    """
+    Legacy Supabase keys are JWT-like (three dot-separated parts).
+    New sb_secret/sb_publishable keys are NOT JWT-like.
+    """
+    k = (key or "").strip()
+    return k.count(".") == 2
+
+
+def _headers(
+    *,
+    prefer: Optional[str] = None,
+    key: Optional[str] = None,
+    content_type: Optional[str] = None,
+    authorization_bearer: Optional[str] = None,
+) -> Dict[str, str]:
+    """
+    IMPORTANT:
+    - Always send "apikey".
+    - Send "Authorization: Bearer ..." ONLY when:
+        a) caller supplies a real JWT via authorization_bearer (e.g., user access token), OR
+        b) the key is legacy JWT-like (anon/service role old format).
+    - DO NOT send Authorization Bearer for sb_secret_* / sb_publishable_* keys.
+    """
     _ensure_config()
 
-    # Supabase supports both:
-    # - Legacy JWT keys: "eyJhbGciOi..."
-    # - New API keys: "sb_publishable_..." / "sb_secret_..."
-    #
-    # PostgREST expects apikey and Authorization Bearer.
-    key = (key or SUPABASE_READ_KEY or "").strip()
-
-    if not key:
+    k = (key or SUPABASE_READ_KEY or "").strip()
+    if not k:
         raise RuntimeError("Supabase key missing for this operation.")
 
-    h: Dict[str, str] = {
-        "apikey": key,
-        "Authorization": f"Bearer {key}",
-    }
+    h: Dict[str, str] = {"apikey": k}
 
-    # Default JSON content-type for PostgREST operations
-    if content_type:
-        h["Content-Type"] = content_type
+    if authorization_bearer:
+        h["Authorization"] = f"Bearer {authorization_bearer}"
     else:
-        h["Content-Type"] = "application/json"
+        if _is_jwt_like(k):
+            h["Authorization"] = f"Bearer {k}"
 
+    h["Content-Type"] = content_type or "application/json"
     if prefer:
         h["Prefer"] = prefer
     return h
@@ -215,9 +225,6 @@ def _headers(*, prefer: Optional[str] = None, key: Optional[str] = None, content
 # INTERNAL: parse Supabase error JSON safely
 # ----------------------------------------------------
 def _try_parse_error(resp: requests.Response) -> Tuple[Optional[str], str]:
-    """
-    Returns (error_code, raw_text).
-    """
     try:
         j = resp.json()
         if isinstance(j, dict):
@@ -227,9 +234,6 @@ def _try_parse_error(resp: requests.Response) -> Tuple[Optional[str], str]:
     return (None, resp.text)
 
 
-# ----------------------------------------------------
-# INTERNAL: safer json parsing for list/object responses
-# ----------------------------------------------------
 def _try_json(resp: requests.Response) -> Any:
     try:
         return resp.json()
@@ -237,9 +241,6 @@ def _try_json(resp: requests.Response) -> Any:
         return None
 
 
-# ----------------------------------------------------
-# INTERNAL: normalize Supabase REST JSON response to List[Dict]
-# ----------------------------------------------------
 def _normalize_list(data: Any) -> List[Dict[str, Any]]:
     if isinstance(data, list):
         return [d for d in data if isinstance(d, dict)]
@@ -319,27 +320,12 @@ def supabase_insert(table: str, records: List[Dict[str, Any]]) -> Any:
 
 # ----------------------------------------------------
 # UPSERT helper (INSERT OR UPDATE) via REST
-# with fallback when Postgres rejects ON CONFLICT
 # ----------------------------------------------------
 def supabase_upsert(
     table: str,
     records: List[Dict[str, Any]],
     conflict_col: str,
 ) -> Any:
-    """
-    Performs UPSERT (insert or update) on any table via Supabase REST.
-
-    Primary method:
-      POST /table?on_conflict=conflict_col
-      Prefer: resolution=merge-duplicates
-
-    Fallback method (when DB has no unique constraint on conflict_col):
-      - PATCH /table?conflict_col=eq.<value>  (update)
-      - if no row updated, POST insert
-
-    This fallback keeps your API functional even if the DB constraint is missing,
-    but the recommended fix is still adding a UNIQUE constraint in Postgres.
-    """
     if not isinstance(records, list) or len(records) == 0:
         raise ValueError("supabase_upsert: 'records' must be a non-empty list")
 
@@ -359,7 +345,6 @@ def supabase_upsert(
         data = _try_json(resp)
         return data if data is not None else {"status": "ok"}
 
-    # ---- Handle failure cases
     err_code, raw = _try_parse_error(resp)
 
     # 42P10 = "there is no unique or exclusion constraint matching the ON CONFLICT specification"
@@ -374,13 +359,11 @@ def supabase_upsert(
             key_val = rec[conflict_col]
             where = {conflict_col: f"eq.{key_val}"}
 
-            # 1) try UPDATE
             updated = _patch(table, where, rec)
             if updated:
                 out.extend(updated)
                 continue
 
-            # 2) if no row updated, INSERT
             inserted = supabase_insert(table, [rec])
             if isinstance(inserted, list):
                 out.extend(inserted)
@@ -454,12 +437,11 @@ class _RestQuery:
     def __init__(self, table: str):
         self._table = table
         self._select = "*"
-        self._filters: list[tuple[str, str, str]] = []  # (col, op, val)
-        self._order: tuple[str, bool] | None = None  # (col, desc)
+        self._filters: list[tuple[str, str, str]] = []
+        self._order: tuple[str, bool] | None = None
         self._range: tuple[int, int] | None = None
         self._single = False
 
-        # write ops
         self._op: str = "select"  # select | insert | update | upsert
         self._payload: Any = None
         self._upsert_conflict: Optional[str] = None
@@ -494,7 +476,6 @@ class _RestQuery:
         return self
 
     def in_(self, col: str, values: list[str]):
-        # PostgREST expects: col=in.(a,b,c)
         joined = ",".join([str(v) for v in values])
         self._filters.append((col, "in", f"({joined})"))
         return self
@@ -508,7 +489,6 @@ class _RestQuery:
         return self
 
     def limit(self, n: int):
-        # emulate limit by range(0, n-1) if range not set
         if self._range is None:
             self._range = (0, int(n) - 1)
         return self
@@ -532,7 +512,6 @@ class _RestQuery:
             col, desc = self._order
             params["order"] = f"{col}.{'desc' if desc else 'asc'}"
 
-        # Supabase REST supports offset + limit
         if self._range:
             start, end = self._range
             params["offset"] = str(start)
@@ -607,23 +586,10 @@ class _RestSupabase:
 SUPABASE_CLIENT_INIT_ERROR: Optional[str] = None
 
 
-def _is_jwt_like(key: str) -> bool:
-    """
-    Legacy Supabase keys are JWT-like (three dot-separated parts).
-    New sb_secret/sb_publishable keys are NOT JWT-like.
-    """
-    k = (key or "").strip()
-    return k.count(".") == 2
-
-
 def _create_supabase_py_client():
     """
     Try to create supabase-py client. Never raises.
     Sets SUPABASE_CLIENT_INIT_ERROR on failure.
-
-    IMPORTANT (Path A):
-    With supabase>=2.0, both legacy JWT keys and new sb_* keys are supported.
-    So we DO NOT skip client creation for non-JWT keys anymore.
     """
     global SUPABASE_CLIENT_INIT_ERROR
     SUPABASE_CLIENT_INIT_ERROR = None
@@ -641,18 +607,13 @@ def _create_supabase_py_client():
     try:
         return create_client(SUPABASE_URL, SUPABASE_KEY)
     except Exception as e:
-        # Keep a useful error message for Cloud Run logs
         SUPABASE_CLIENT_INIT_ERROR = f"create_client failed: {e}"
         return None
 
 
-# This is what your routers import and use: `from utils.supabase_client import supabase`
-# We guarantee:
-# - None if NOT configured
-# - supabase-py client if possible
-# - REST fallback if configured but supabase-py fails
 _supabase_py = _create_supabase_py_client()
 supabase = None  # type: ignore
+
 if is_supabase_configured():
     supabase = _supabase_py if _supabase_py is not None else _RestSupabase()
 else:
@@ -663,18 +624,12 @@ def get_supabase_client():
     """
     Returns a usable client (supabase-py OR REST fallback) when configured.
     If not configured, returns None.
-
-    Also exposes SUPABASE_CLIENT_INIT_ERROR for diagnostics.
     """
     if not is_supabase_configured():
         return None
     return supabase
 
 
-# Back-compat: some services expect db() / get_supabase_admin()
-def db():
-    return get_supabase_client()
-
-
+# Back-compat: some services expect get_supabase_admin()
 def get_supabase_admin():
     return get_supabase_client()

@@ -6,6 +6,8 @@ from services.forensic_repo import (
 from services.forensic_snapshot import snapshot_payload
 from utils.forensic_hash import sha256_text
 from services.forensic_analysis import run_cida_audit
+from services.forensic_normalize import normalize_forensic_transcript
+
 
 def create_case_if_missing(vector_id: str, source_url: str, publisher=None, title=None):
     """
@@ -14,6 +16,7 @@ def create_case_if_missing(vector_id: str, source_url: str, publisher=None, titl
     case = upsert_case(vector_id, source_url, publisher, title)
     insert_event(case["id"], "CASE_CREATED", payload={"vector_id": vector_id, "source_url": source_url})
     return {"caseId": case["id"], "vectorId": case["vector_id"], "status": case["status"]}
+
 
 def list_cases(status=None):
     """
@@ -25,9 +28,10 @@ def list_cases(status=None):
     res = q.execute()
     return res.data
 
+
 def create_snapshot_for_case(vector_id: str):
     """
-    Original logic: Full snapshot procedure including storage pathing, 
+    Original logic: Full snapshot procedure including storage pathing,
     deactivation of old snapshots, and artifact creation.
     """
     case = get_case_by_vector(vector_id)
@@ -38,9 +42,9 @@ def create_snapshot_for_case(vector_id: str):
     payload = snapshot_payload(case["source_url"])
 
     # Original Path Logic: Ensure 4-digit padding for snap folders
-    html_path_simple = f"{vector_id}/snap_{seq}/source.html" 
+    html_path_simple = f"{vector_id}/snap_{seq}/source.html"
     html_path = f"entity_{vector_id}/snap_{int(seq):04d}/source.html"
-    
+
     html_uri = upload_text("forensic-snapshots", html_path, payload["html"], "text/html")
 
     # create snapshot row (deactivate old active first)
@@ -58,10 +62,10 @@ def create_snapshot_for_case(vector_id: str):
         "screenshots_uris": [],
         "is_active": True
     }).execute()
-    
+
     if not snap_ins.data:
         raise RuntimeError("Failed to insert snapshot")
-        
+
     snapshot = snap_ins.data[0]
 
     # create artifacts (plaintext now, claims later)
@@ -78,7 +82,7 @@ def create_snapshot_for_case(vector_id: str):
 
     # set active snapshot on case
     db().table("forensic_cases").update({
-        "active_snapshot_id": snapshot["id"], 
+        "active_snapshot_id": snapshot["id"],
         "status": "SNAPSHOTTED"
     }).eq("id", case["id"]).execute()
 
@@ -89,14 +93,15 @@ def create_snapshot_for_case(vector_id: str):
     })
 
     return {
-        "snapshotId": snapshot["id"], 
-        "snapshotSeq": seq, 
+        "snapshotId": snapshot["id"],
+        "snapshotSeq": seq,
         "contentHashSha256": payload["content_hash_sha256"]
     }
 
+
 def run_analysis_for_case(vector_id: str):
     """
-    UPDATED FULL LOGIC: Retrieves from storage, runs CIDA Audit, 
+    UPDATED FULL LOGIC: Retrieves from storage, runs CIDA Audit,
     populates dashboard table (case_studies) and detail table (forensic_analyses).
     """
     case = get_case_by_vector(vector_id)
@@ -122,16 +127,24 @@ def run_analysis_for_case(vector_id: str):
     bucket_path = f"entity_{vector_id}/snap_0001/source.html"
     try:
         raw_bytes = db().storage.from_("forensic-snapshots").download(bucket_path)
-        content_to_analyze = raw_bytes.decode('utf-8')
+        content_to_analyze = raw_bytes.decode("utf-8")
     except Exception:
         # Fallback to local artifact if bucket retrieval fails
-        art_res = db().table("forensic_artifacts").select("plain_text").eq("snapshot_id", snapshot["id"]).single().execute()
-        content_to_analyze = art_res.data.get("plain_text", "No content available")
+        art_res = (
+            db()
+            .table("forensic_artifacts")
+            .select("plain_text")
+            .eq("snapshot_id", snapshot["id"])
+            .single()
+            .execute()
+        )
+        content_to_analyze = (art_res.data or {}).get("plain_text", "No content available")
 
     # RUN SMART CIDA AUDIT
     audit_data = run_cida_audit(content_to_analyze)
 
     # POPULATE 'case_studies' (For Dashboard UI)
+    # IMPORTANT: Do NOT send "audited_at": "now()" from Python; let DB default handle it.
     db().table("case_studies").upsert({
         "id": vector_id,
         "source": case.get("publisher") or "Pamfleti",
@@ -142,8 +155,7 @@ def run_analysis_for_case(vector_id: str):
         "integrity_scor": audit_data.get("integrity_score", 0),
         "blackmail_pr": audit_data.get("blackmail_prob", 0),
         "key_tactics": audit_data.get("key_tactics", []),
-        "is_published": True,
-        "audited_at": "now()"
+        "is_published": True
     }).execute()
 
     # next analysis version
@@ -157,12 +169,18 @@ def run_analysis_for_case(vector_id: str):
         "engine_version": "CIDA_v2.4",
         "status": "COMPLETED",
         "forensic_segments": audit_data.get("segments", []),
-        "evidence_points": [], # Placeholder for NER evidence
-        "fallacies": [],       # Placeholder
+        "evidence_points": [],  # Placeholder for NER evidence
+        "fallacies": [],        # Placeholder
         "ethics_scorecard": [], # Placeholder
         "rebuttal_ledger": audit_data.get("rebuttal_ledger", []),
-        "verdict": {"tier": audit_data.get("verdict_tier"), "summary": audit_data.get("verdict_summary_en")},
-        "metrics": {"integrity": audit_data.get("integrity_score"), "blackmail": audit_data.get("blackmail_prob")},
+        "verdict": {
+            "tier": audit_data.get("verdict_tier"),
+            "summary": audit_data.get("verdict_summary_en")
+        },
+        "metrics": {
+            "integrity": audit_data.get("integrity_score"),
+            "blackmail": audit_data.get("blackmail_prob")
+        },
         "created_by": "system",
     }
 
@@ -180,6 +198,7 @@ def run_analysis_for_case(vector_id: str):
     })
 
     return {"analysisId": analysis["id"], "analysisVersion": next_ver, "status": analysis.get("status")}
+
 
 def get_forensic_page_payload(vector_id: str, version: str = "latest"):
     """
@@ -276,12 +295,22 @@ def get_forensic_page_payload(vector_id: str, version: str = "latest"):
         "artifacts": artifacts,
         "analysis": analysis,
     }
-    
+
+    # --- Normalized transcript for React Redline UI ---
+    if analysis and isinstance(analysis, dict):
+        segments = analysis.get("forensic_segments") or analysis.get("segments") or []
+        payload["forensicTranscript"] = normalize_forensic_transcript({
+            "segments": segments,
+            "evidence_points": analysis.get("evidence_points") or [],
+        })
+    else:
+        payload["forensicTranscript"] = []
+
     # Map to specific React Interface if dashboard row exists
     if cs_res.data:
         payload["integrityScore"] = cs_res.data.get("integrity_scor")
         payload["blackmailProb"] = cs_res.data.get("blackmail_pr")
         payload["verdictSummary_sq"] = cs_res.data.get("verdict_summ")
         payload["headline_sq"] = cs_res.data.get("headline")
-        
+
     return {"data": payload}

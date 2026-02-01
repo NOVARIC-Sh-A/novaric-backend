@@ -77,6 +77,7 @@ def upsert_case(
         # Optional: update metadata if new values provided
         current = existing.data[0]
         patch: Dict[str, Any] = {}
+
         if publisher and not current.get("publisher"):
             patch["publisher"] = publisher
         if title and not current.get("title"):
@@ -125,7 +126,10 @@ def get_case_by_vector(vector_id: str) -> Optional[Dict[str, Any]]:
     return res.data[0] if res.data else None
 
 
-def update_case(case_id: int, patch: Dict[str, Any]) -> None:
+def update_case(case_id: str, patch: Dict[str, Any]) -> None:
+    """
+    case_id is typically a UUID (string) in Supabase.
+    """
     if not patch:
         return
     sb = db()
@@ -136,12 +140,12 @@ def update_case(case_id: int, patch: Dict[str, Any]) -> None:
 # EVENTS (AUDIT TRAIL)
 # ============================================================
 def insert_event(
-    case_id: int,
+    case_id: str,
     event_type: str,
     *,
     actor: str = "system",
-    snapshot_id: Optional[int] = None,
-    analysis_id: Optional[int] = None,
+    snapshot_id: Optional[str] = None,
+    analysis_id: Optional[str] = None,
     payload: Optional[Dict[str, Any]] = None,
 ) -> None:
     sb = db()
@@ -160,7 +164,7 @@ def insert_event(
 # ============================================================
 # SNAPSHOTS
 # ============================================================
-def next_snapshot_seq(case_id: int) -> int:
+def next_snapshot_seq(case_id: str) -> int:
     sb = db()
     res = (
         sb.table("forensic_snapshots")
@@ -173,7 +177,7 @@ def next_snapshot_seq(case_id: int) -> int:
     return (int(res.data[0]["snapshot_seq"]) + 1) if res.data else 1
 
 
-def deactivate_previous_snapshots(case_id: int) -> None:
+def deactivate_previous_snapshots(case_id: str) -> None:
     """
     Ensures only one active snapshot per case.
     Safe to call even if none active.
@@ -186,7 +190,7 @@ def deactivate_previous_snapshots(case_id: int) -> None:
 
 def insert_snapshot(
     *,
-    case_id: int,
+    case_id: str,
     snapshot_seq: int,
     canonical_url: str,
     http_status: Optional[int],
@@ -221,7 +225,7 @@ def insert_snapshot(
     return ins.data[0]
 
 
-def get_active_snapshot(case_id: int) -> Optional[Dict[str, Any]]:
+def get_active_snapshot(case_id: str) -> Optional[Dict[str, Any]]:
     sb = db()
     res = (
         sb.table("forensic_snapshots")
@@ -239,7 +243,7 @@ def get_active_snapshot(case_id: int) -> Optional[Dict[str, Any]]:
 # ============================================================
 def upsert_artifacts(
     *,
-    snapshot_id: int,
+    snapshot_id: str,
     language: Optional[str],
     plain_text: str,
     text_hash_sha256: str,
@@ -285,7 +289,7 @@ def upsert_artifacts(
     return ins.data[0]
 
 
-def get_artifacts(snapshot_id: int) -> Optional[Dict[str, Any]]:
+def get_artifacts(snapshot_id: str) -> Optional[Dict[str, Any]]:
     sb = db()
     res = (
         sb.table("forensic_artifacts")
@@ -300,7 +304,7 @@ def get_artifacts(snapshot_id: int) -> Optional[Dict[str, Any]]:
 # ============================================================
 # ANALYSES
 # ============================================================
-def next_analysis_version(case_id: int) -> int:
+def next_analysis_version(case_id: str) -> int:
     sb = db()
     res = (
         sb.table("forensic_analyses")
@@ -315,8 +319,8 @@ def next_analysis_version(case_id: int) -> int:
 
 def insert_analysis(
     *,
-    case_id: int,
-    snapshot_id: int,
+    case_id: str,
+    snapshot_id: str,
     analysis_version: int,
     engine_version: str,
     status: str,
@@ -356,7 +360,7 @@ def insert_analysis(
     return ins.data[0]
 
 
-def get_latest_analysis(case_id: int) -> Optional[Dict[str, Any]]:
+def get_latest_analysis(case_id: str) -> Optional[Dict[str, Any]]:
     sb = db()
     res = (
         sb.table("forensic_analyses")
@@ -369,7 +373,7 @@ def get_latest_analysis(case_id: int) -> Optional[Dict[str, Any]]:
     return res.data[0] if res.data else None
 
 
-def get_analysis_by_version(case_id: int, analysis_version: int) -> Optional[Dict[str, Any]]:
+def get_analysis_by_version(case_id: str, analysis_version: int) -> Optional[Dict[str, Any]]:
     sb = db()
     res = (
         sb.table("forensic_analyses")
@@ -387,8 +391,8 @@ def get_analysis_by_version(case_id: int, analysis_version: int) -> Optional[Dic
 # ============================================================
 def insert_report(
     *,
-    case_id: int,
-    analysis_id: int,
+    case_id: str,
+    analysis_id: str,
     report_type: str,
     uri: str,
     file_hash_sha256: Optional[str] = None,
